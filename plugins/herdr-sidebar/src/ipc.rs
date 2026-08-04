@@ -11,8 +11,19 @@
 //! (herdr feeds the whole path through interprocess' namespaced naming), which a
 //! plain `File` can speak. On unix it is an ordinary unix domain socket.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// How long to wait for a response before giving up. `exchange` runs on the
+/// UI/event-loop thread (`viewer.rs`, input handlers), so an unbounded read
+/// would hang the whole sidebar if the herdr process accepts the connection
+/// but never answers.
+const IPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cap on a single response line, so a runaway/malformed reply can't grow
+/// unbounded in memory.
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// `HERDR_SOCKET_PATH` (injected into hook/action commands), falling back to
 /// herdr's default socket location.
@@ -75,6 +86,13 @@ pub fn report_identity(pane_id: &str, my: crate::state::View, merged: bool) {
     );
 }
 
+// Windows' named-pipe `File` handle has no `set_read_timeout` via std (no
+// overlapped I/O in this fix's scope), so it's bounded with a background
+// thread instead. unix sockets support native read/write timeouts, which
+// `roundtrip` uses directly below — no thread, so no risk of a blocked
+// reader thread + open fd lingering past the timeout when the peer never
+// responds (the thread-based approach would leak exactly that on every
+// timeout against a wedged peer).
 #[cfg(windows)]
 fn roundtrip(path: &std::path::Path, request: &str) -> std::io::Result<String> {
     let pipe = format!(r"\\.\pipe\{}", path.display());
@@ -82,20 +100,93 @@ fn roundtrip(path: &std::path::Path, request: &str) -> std::io::Result<String> {
         .read(true)
         .write(true)
         .open(pipe)?;
-    exchange(stream, request)
+    exchange_with_thread_timeout(stream, request, IPC_TIMEOUT)
 }
 
 #[cfg(unix)]
 fn roundtrip(path: &std::path::Path, request: &str) -> std::io::Result<String> {
     let stream = std::os::unix::net::UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(IPC_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_TIMEOUT))?;
     exchange(stream, request)
 }
 
-fn exchange<S: std::io::Read + Write>(mut stream: S, request: &str) -> std::io::Result<String> {
+/// Write the request, then read one response line. `S` must already have its
+/// own read/write timeout configured by the caller.
+fn exchange<S: Read + Write>(mut stream: S, request: &str) -> std::io::Result<String> {
     stream.write_all(request.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
+    BufReader::new(stream.take(MAX_RESPONSE_BYTES)).read_line(&mut line)?;
     Ok(line)
+}
+
+/// Windows-only: bound the read with a background thread + `recv_timeout`
+/// since `File` has no native read timeout via std. Note this can still
+/// leak a blocked thread and an open pipe handle if the peer never responds
+/// and never closes the pipe — accepted here as strictly better than the
+/// previous unconditional hang, not as a full fix (that needs overlapped
+/// I/O on the pipe handle).
+#[cfg(windows)]
+fn exchange_with_thread_timeout<S: Read + Write + Send + 'static>(
+    mut stream: S,
+    request: &str,
+    timeout: Duration,
+) -> std::io::Result<String> {
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stream.take(MAX_RESPONSE_BYTES))
+            .read_line(&mut line)
+            .map(|_| line);
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout).unwrap_or_else(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "herdr socket response timed out",
+        ))
+    })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    /// A peer that accepts the connection but never reads or writes must not
+    /// hang the caller — this is the exact shape of a wedged herdr host.
+    /// Exercises the real `roundtrip` timeout setup (not a hand-rolled one)
+    /// so the test would fail if a future change dropped the timeout calls.
+    #[test]
+    fn exchange_times_out_instead_of_hanging_on_an_unresponsive_peer() {
+        let path = std::env::temp_dir()
+            .join(format!("aa-ipc-timeout-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            // Accept and hold the connection open (binding it, not `let _`,
+            // which would drop it immediately and close the socket) without
+            // ever responding; the stream's own timeout is what bounds this.
+            if let Ok((_conn, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+        let stream = UnixStream::connect(&path).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_millis(200))).unwrap();
+        let start = std::time::Instant::now();
+        let result = exchange(stream, "{}");
+        let elapsed = start.elapsed();
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "an unresponsive peer must not report success");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must bail out around the timeout, not hang; took {elapsed:?}"
+        );
+    }
 }

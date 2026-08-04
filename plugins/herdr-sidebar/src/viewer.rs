@@ -38,10 +38,36 @@ const POLL: Duration = Duration::from_millis(250);
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_LINES: usize = 5000;
 
+/// Directory for the sidebar's private scratch files (control/park files).
+/// `std::env::temp_dir()` can be a shared, world-writable directory (unix
+/// `/tmp`) where our filenames are predictable from the pane id; scope our
+/// files into a private, mode-0700 subdirectory so another local user can't
+/// plant a symlink at a path we're about to `fs::write` through. Windows'
+/// per-user `%TEMP%` needs no extra scoping.
+fn scratch_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join("herdr-sidebar-scratch");
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    dir
+}
+
+/// Write `contents` to `path`, refusing to follow a pre-existing symlink at
+/// that location (defense in depth alongside `scratch_dir`'s 0700 perms).
+fn write_scratch_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        std::fs::remove_file(path)?;
+    }
+    std::fs::write(path, contents)
+}
+
 /// The control file the sidebar writes requests into, unique per sidebar
 /// pane (tab) so tabs don't steer each other's viewers.
 pub fn control_path(sidebar_pane_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+    scratch_dir().join(format!(
         "herdr-sidebar-preview-{}.ctl",
         sidebar_pane_id.replace(':', "_")
     ))
@@ -484,7 +510,7 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme) -> usize {
 /// human-readable notices.
 pub fn open_in_pane(my_pane_id: &str, spawn_cwd: &Path, payload: &str) -> Result<(), String> {
     let control = control_path(my_pane_id);
-    std::fs::write(&control, payload).map_err(|e| format!("preview failed: {e}"))?;
+    write_scratch_file(&control, payload).map_err(|e| format!("preview failed: {e}"))?;
     let full = crate::state::load_state().preview_full;
 
     // Measure the sidebar's width share FIRST: closing a stale viewer below
@@ -685,8 +711,7 @@ fn spawn_viewer_pane(
 /// Park plan for `owner`'s tab, recorded beside the control file so either
 /// process (sidebar or viewer) can restore.
 fn park_path(owner: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join(format!("herdr-sidebar-preview-{}.park.json", owner.replace(':', "_")))
+    scratch_dir().join(format!("herdr-sidebar-preview-{}.park.json", owner.replace(':', "_")))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
@@ -835,7 +860,7 @@ fn park_others(owner: &str) {
     }
     let plan = ParkPlan { tab, owner_ratio, panes: others };
     if let Ok(json) = serde_json::to_string(&plan) {
-        let _ = std::fs::write(park_path(owner), json);
+        let _ = write_scratch_file(&park_path(owner), &json);
     }
 }
 
@@ -1024,6 +1049,42 @@ fn right_neighbor(layout_json: &str, pane_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_dir_is_private_to_the_owning_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "scratch dir must not be group/world readable or writable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_scratch_file_refuses_to_follow_a_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = scratch_dir();
+        let victim = dir.join(format!("aa-victim-{}.txt", std::process::id()));
+        let link = dir.join(format!("aa-link-{}.ctl", std::process::id()));
+        std::fs::write(&victim, "original victim contents").unwrap();
+        let _ = std::fs::remove_file(&link);
+        symlink(&victim, &link).unwrap();
+
+        write_scratch_file(&link, "payload").unwrap();
+
+        // The symlink must have been replaced by a real file, and the
+        // victim it used to point at must be untouched.
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "payload");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original victim contents");
+
+        let _ = std::fs::remove_file(&victim);
+        let _ = std::fs::remove_file(&link);
+    }
 
     #[test]
     fn requests_roundtrip() {
