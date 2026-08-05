@@ -318,6 +318,16 @@ HACKING.md — budget time for that before promising a patched build.
   pane a corpse after 20s. "Change Folder (Type Path)…" keeps the typed prompt (absolute,
   relative, or ~-prefixed); either path swaps the PROCESS cwd, so the other view follows
   on its next switch.
+- "Open with Default App" (`actions::open_external`, in the Explorer menu for FILE rows
+  only and in the SCM file menu unless the entry's status letter is `D`) hands the path to
+  the OS shell association. Windows uses `explorer.exe <path>`, NOT `cmd /c start`: explorer
+  is GUI-subsystem, so no console is created and Windows 11 never flashes a Windows Terminal
+  window; it resolves the association exactly like a double click (verified live — a .html
+  row launched the ChromeHTML handler; a broken/unregistered association falls back to the
+  shell's own "Open with" dialog, which is correct behavior). Its exit code is unreliable
+  (explorer routinely returns 1 on success), so only the SPAWN is reported. Directories are
+  deliberately excluded — their association IS the file manager, which "Reveal in File
+  Explorer" already covers.
 - List UX invariants (both views): NOTHING is highlighted until the user selects
   (hover stays subtle); the wheel scrolls the VIEW only (`scroll_view`) and never
   moves the selection; keyboard nav snaps the view to the selection; overflow shows a
