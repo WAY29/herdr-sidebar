@@ -74,6 +74,19 @@ cargo clippy -- -D warnings
   `strip_bom` in both plugins' `launch.rs`).
 - `cargo build --release` fails with **os error 5 (Access is denied)** while the plugin's TUI is
   running in a pane — Windows locks running exes. Close/quit the pane first, rebuild, relaunch.
+  Alternative that avoids racing the ensure hook's re-dock: Windows allows RENAMING a running
+  exe — move `herdr-sidebar.exe`/`herdr-sidebar-ensure.exe` aside (`*-old.exe`), build, then
+  redeploy; delete the `-old` files after every straggler process exits.
+- **PS 5.1 Get-Content/Set-Content mojibake**: round-tripping a BOM-less UTF-8 file
+  (`(Get-Content x -Raw) -replace ... | Set-Content x`) reads it as ANSI and corrupts every
+  non-ASCII char (— becomes â€”) plus adds a BOM on write. Never edit UTF-8 files with
+  PS 5.1 string cmdlets; and write `git commit -F` message files via
+  `[IO.File]::WriteAllText(..., UTF8Encoding($false))` (Out-File utf8 BOM leaks U+FEFF into
+  the commit subject).
+- **CI does not run on first-time contributors' PRs** (needs maintainer approval), so a green
+  dependabot row next to a checkless human PR means nothing — run test + clippy locally before
+  merging; clippy findings differ per-OS (a unix-only helper passes CI's ubuntu leg but fails
+  `-D warnings` dead_code on Windows).
 - **Propagating a rebuild to every workspace**: plugin registration is global (one `plugin link`
   serves all workspaces), but stale panes keep old binaries AND a dead-but-open Explorer/Sidebar
   pane blocks the ensure hook's re-dock (it matches by label/token, not liveness). Run
