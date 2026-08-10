@@ -193,32 +193,83 @@ fn load_show(root: &Path, spec: &str, path: Option<&str>) -> Doc {
     }
 }
 
+/// Render markdown text via `glow`. Returns `None` when glow is not installed
+/// or exits non-zero (caller falls back to syntax highlight).
+///
+/// Receives the already-read `text` buffer so the MAX_BYTES guard in
+/// `load_file` is honoured — glow would otherwise re-read the full file.
+/// Pipes via stdin (`-`) to avoid treating filenames starting with `-` as
+/// flags. Width is a best-effort approximation; the ideal fix would pass
+/// `body.width` from `draw_doc` once that is available at load time.
+fn glow_markdown(text: &str, width: u16) -> Option<Vec<Line<'static>>> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("glow")
+        .args(["--style", "dark", "--width", &width.to_string(), "-"])
+        .env("CLICOLOR_FORCE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    if rendered.trim().is_empty() {
+        return None;
+    }
+    let mut lines = ansi::to_lines(&rendered);
+    lines.truncate(MAX_LINES);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines)
+}
+
 fn load_file(target: &Path) -> Doc {
     let name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| target.display().to_string());
-    let lines: Vec<Line<'static>> = match std::fs::read(target) {
-        Err(e) => vec![Line::raw(format!("(unreadable: {e})"))],
+    let lower = name.to_lowercase();
+    let is_markdown = lower.ends_with(".md") || lower.ends_with(".markdown");
+    let (lines, numbered) = match std::fs::read(target) {
+        Err(e) => (vec![Line::raw(format!("(unreadable: {e})"))], true),
         Ok(bytes) => {
             let head = &bytes[..bytes.len().min(8192)];
             if head.contains(&0) {
-                vec![Line::raw(format!("(binary file — {} bytes)", bytes.len()))]
+                (vec![Line::raw(format!("(binary file — {} bytes)", bytes.len()))], false)
             } else {
                 let truncated = bytes.len() > MAX_BYTES;
                 let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES)]);
-                // Syntax highlighting when a grammar matches; plain otherwise.
-                let mut lines: Vec<Line<'static>> =
+                // Markdown: render via glow; fall back to syntax highlight on failure.
+                // Width is approximated by subtracting 6 for the sidebar share and
+                // line-number gutter; ideal fix is to pass body.width from draw_doc.
+                let glow_width =
+                    crossterm::terminal::size().map(|(w, _)| w.saturating_sub(6)).unwrap_or(74);
+                let glow_rendered =
+                    is_markdown.then(|| glow_markdown(&text, glow_width)).flatten();
+                // Glow-rendered markdown gets no line numbers (it formats its own layout).
+                let numbered = glow_rendered.is_none();
+                let mut lines: Vec<Line<'static>> = if let Some(rendered) = glow_rendered {
+                    rendered
+                } else {
                     crate::syntax::highlight(&name, &text, MAX_LINES).unwrap_or_else(|| {
                         text.lines().take(MAX_LINES).map(|l| Line::raw(l.to_string())).collect()
-                    });
+                    })
+                };
                 if truncated || text.lines().count() > MAX_LINES {
                     lines.push(Line::raw("… (truncated)"));
                 }
                 if lines.is_empty() {
                     lines.push(Line::raw("(empty file)"));
                 }
-                lines
+                (lines, numbered)
             }
         }
     };
@@ -226,7 +277,7 @@ fn load_file(target: &Path) -> Doc {
         name,
         context: target.display().to_string(),
         lines,
-        numbered: true,
+        numbered,
         scroll: 0,
     }
 }
@@ -1123,6 +1174,24 @@ mod tests {
             Some(Request::File(PathBuf::from("C:/plain.txt")))
         );
         assert_eq!(parse_request("  "), None);
+    }
+
+    #[test]
+    fn glow_markdown_returns_styled_spans() {
+        // Skip if glow is not installed
+        if std::process::Command::new("glow").arg("--version").output().is_err() {
+            return;
+        }
+        let md = "# Heading\n\n**bold** and `code`\n";
+        let lines = glow_markdown(md, 80);
+        assert!(lines.is_some(), "glow_markdown returned None");
+        let lines = lines.unwrap();
+        assert!(!lines.is_empty(), "glow_markdown returned empty lines");
+        // At least one span must have a non-default style (proof that ANSI was parsed)
+        let has_styled = lines.iter().any(|l| {
+            l.spans.iter().any(|s| s.style != ratatui::style::Style::default())
+        });
+        assert!(has_styled, "glow_markdown returned no styled spans — ANSI not parsed");
     }
 
     #[test]
