@@ -79,8 +79,12 @@ open_pane() {
   [ -n "$np" ] || exit 1
 
   # Move the new pane into the left slot, then start the panel in it.
+  # `--view git` pins the starting view: without it the binary falls back to
+  # the explorer/last-active decision, so with the unified sidebar off this
+  # launcher opened an Explorer pane labeled "Source Control" (issue #14).
+  # The Windows launcher (open-git.ps1) always passed the pin.
   "$herdr_bin" pane swap --source-pane "$np" --target-pane "$target" >/dev/null 2>&1 || true
-  "$herdr_bin" pane run "$np" "exec \"$bin\""
+  "$herdr_bin" pane run "$np" "exec \"$bin\" --view git"
   "$herdr_bin" pane rename "$np" "Source Control" >/dev/null 2>&1 || true
   # Give the TUI time to stamp its identity token before hooks re-check.
   sleep 3
