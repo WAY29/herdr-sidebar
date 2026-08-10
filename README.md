@@ -58,8 +58,9 @@ A real tree, not a directory dump:
   50/50 split instead? toggle "Full-size preview" off in ⚙ Settings). Line numbers,
   scrolling, binary-safe). Click another file — the same pane updates in place.
 - **Double-click folders** to fold, hover highlights, mouse wheel, and a
-  **Ctrl+right-click context menu**: New File, New Folder, Rename, Delete, Copy Path /
-  Relative Path, Reveal in File Explorer.
+  **Ctrl+right-click context menu**: New File, New Folder, Open with Default App (files
+  only — hands the file to the OS-associated app, like a double click in the file
+  manager), Rename, Delete, Copy Path / Relative Path, Reveal in File Explorer.
 - Dotfiles toggle, live refresh, and a collapse-to-sliver mode when you want the columns back.
 
 ### 🔀 Source Control

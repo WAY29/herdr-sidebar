@@ -573,7 +573,7 @@ impl App {
             let row = &self.rows[index];
             (row.path.clone(), row.is_dir)
         });
-        let entries = actions::menu_entries(target.is_none());
+        let entries = actions::menu_entries(target.as_ref().map(|(_, is_dir)| *is_dir));
         let selected = entries
             .iter()
             .position(|e| matches!(e, MenuEntry::Action(..)))
@@ -950,6 +950,14 @@ impl App {
             MenuAction::Delete => {
                 let Some((path, is_dir)) = target else { return };
                 self.overlay = Some(Overlay::ConfirmDelete { path, is_dir });
+            }
+            MenuAction::OpenExternal => {
+                let Some((path, _)) = target else { return };
+                let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+                self.notice = Some(match actions::open_external(&path) {
+                    Ok(()) => format!("opened: {name}"),
+                    Err(err) => format!("open failed: {err}"),
+                });
             }
             MenuAction::Reveal => {
                 let path = target.map(|(p, _)| p).unwrap_or_else(|| self.tree.root_path());
@@ -1647,7 +1655,7 @@ mod tests {
 
     #[test]
     fn menu_navigation_skips_separators_and_clamps() {
-        let entries = actions::menu_entries(false);
+        let entries = actions::menu_entries(Some(false));
         // First entry is an action; stepping up from it stays put.
         assert_eq!(step_menu(&entries, 0, -1), 0);
         // Stepping down over a separator lands on the next action.

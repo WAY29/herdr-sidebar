@@ -13,6 +13,7 @@ pub enum MenuAction {
     CopyRelativePath,
     Rename,
     Delete,
+    OpenExternal,
     Reveal,
     ChangeFolder,
     ChangeFolderTyped,
@@ -24,14 +25,23 @@ pub enum MenuEntry {
     Separator,
 }
 
-/// VS Code-style context menu for a tree row (`is_root` = a right-click on
-/// empty space, targeting the workspace root: creation only).
-pub fn menu_entries(is_root: bool) -> Vec<MenuEntry> {
+/// VS Code-style context menu for a tree row (`target` = `Some(is_dir)` for a
+/// row; `None` for a right-click on empty space, which targets the workspace
+/// root: creation only). "Open with Default App" is offered for files only —
+/// a directory's shell association is the file manager, which is what
+/// "Reveal in File Explorer" already does.
+pub fn menu_entries(target: Option<bool>) -> Vec<MenuEntry> {
     let mut entries = vec![
         MenuEntry::Action(MenuAction::NewFile, "New File…"),
         MenuEntry::Action(MenuAction::NewFolder, "New Folder…"),
     ];
-    if !is_root {
+    if target == Some(false) {
+        entries.extend([
+            MenuEntry::Separator,
+            MenuEntry::Action(MenuAction::OpenExternal, "Open with Default App"),
+        ]);
+    }
+    if target.is_some() {
         entries.extend([
             MenuEntry::Separator,
             MenuEntry::Action(MenuAction::CopyPath, "Copy Path"),
@@ -153,6 +163,32 @@ pub fn reveal(path: &Path) {
     }
 }
 
+/// Open a path with the OS-associated application (VS Code's "Open with
+/// Default App" / a double click in the file manager).
+///
+/// Windows goes through `explorer.exe <path>` rather than `cmd /c start`:
+/// explorer is a GUI-subsystem process, so no console is created for it and
+/// Windows 11 doesn't flash a Windows Terminal window (the same reason the
+/// [[events]] hooks use the windowless sidecar). It resolves the shell
+/// association exactly like a double click. Its exit code is unreliable
+/// (explorer routinely returns 1 on success), so only the spawn is checked.
+pub fn open_external(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+
+    std::process::Command::new(program)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,14 +200,27 @@ mod tests {
         dir
     }
 
+    fn has(entries: &[MenuEntry], action: MenuAction) -> bool {
+        entries.iter().any(|e| matches!(e, MenuEntry::Action(a, _) if *a == action))
+    }
+
     #[test]
     fn menu_shape_for_rows_and_root() {
-        let row = menu_entries(false);
+        let row = menu_entries(Some(false));
         assert!(matches!(row[0], MenuEntry::Action(MenuAction::NewFile, _)));
-        assert!(row.iter().any(|e| matches!(e, MenuEntry::Action(MenuAction::Delete, _))));
-        let root = menu_entries(true);
-        assert!(!root.iter().any(|e| matches!(e, MenuEntry::Action(MenuAction::Rename, _))));
-        assert!(root.iter().any(|e| matches!(e, MenuEntry::Action(MenuAction::Reveal, _))));
+        assert!(has(&row, MenuAction::Delete));
+        let root = menu_entries(None);
+        assert!(!has(&root, MenuAction::Rename));
+        assert!(has(&root, MenuAction::Reveal));
+    }
+
+    #[test]
+    fn open_external_is_offered_for_files_only() {
+        assert!(has(&menu_entries(Some(false)), MenuAction::OpenExternal), "file row");
+        assert!(!has(&menu_entries(Some(true)), MenuAction::OpenExternal), "directory row");
+        assert!(!has(&menu_entries(None), MenuAction::OpenExternal), "empty space");
+        // Directories keep everything else they had.
+        assert!(has(&menu_entries(Some(true)), MenuAction::Rename));
     }
 
     #[test]

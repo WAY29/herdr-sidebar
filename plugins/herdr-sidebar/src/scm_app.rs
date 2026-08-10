@@ -31,7 +31,7 @@ use herdr_sidebar::ui::{
     title_actions_visible, title_actions_width, truncate_to, within, wrap_footer_message,
     wrap_hints,
 };
-use herdr_sidebar::actions::{copy_to_clipboard, reveal};
+use herdr_sidebar::actions::{copy_to_clipboard, open_external, reveal};
 use herdr_sidebar::suggest;
 
 // VS Code's dark-theme git decoration colors.
@@ -343,6 +343,7 @@ enum MenuAction {
     Discard,
     CopyPath,
     CopyRelativePath,
+    OpenExternal,
     Reveal,
     // Drawer-line actions (commits, branches, stashes, remotes, tags).
     ShowRef,
@@ -1182,13 +1183,15 @@ impl App {
             _ => return, // section headers have no menu
         };
         let Some(entry) = entry.cloned() else { return };
-        let mut entries = vec![
-            MenuEntry::Action(MenuAction::OpenDiff, "Open Diff"),
-            MenuEntry::Action(
-                MenuAction::StageOrUnstage,
-                if staged { "Unstage Changes" } else { "Stage Changes" },
-            ),
-        ];
+        let mut entries = vec![MenuEntry::Action(MenuAction::OpenDiff, "Open Diff")];
+        // A deleted file has nothing left on disk to hand to the shell.
+        if entry.letter != 'D' {
+            entries.push(MenuEntry::Action(MenuAction::OpenExternal, "Open with Default App"));
+        }
+        entries.push(MenuEntry::Action(
+            MenuAction::StageOrUnstage,
+            if staged { "Unstage Changes" } else { "Stage Changes" },
+        ));
         if !staged {
             entries.push(MenuEntry::Action(MenuAction::Discard, "Discard Changes…"));
         }
@@ -1656,6 +1659,14 @@ impl App {
                 let rel = entry.path.replace('/', std::path::MAIN_SEPARATOR_STR);
                 let path = repo_root.unwrap_or_else(|| self.cwd.clone()).join(rel);
                 reveal(&path);
+            }
+            MenuAction::OpenExternal => {
+                let rel = entry.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+                let path = repo_root.unwrap_or_else(|| self.cwd.clone()).join(&rel);
+                self.flash = Some(match open_external(&path) {
+                    Ok(()) => (format!("opened: {rel}"), false),
+                    Err(err) => (format!("open failed: {err}"), true),
+                });
             }
             _ => {}
         }
