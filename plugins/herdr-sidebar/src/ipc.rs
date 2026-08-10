@@ -112,7 +112,10 @@ fn roundtrip(path: &std::path::Path, request: &str) -> std::io::Result<String> {
 }
 
 /// Write the request, then read one response line. `S` must already have its
-/// own read/write timeout configured by the caller.
+/// own read/write timeout configured by the caller. (unix-only: the Windows
+/// path bounds the read with `exchange_with_thread_timeout` instead, since a
+/// named-pipe `File` has no native read timeout via std.)
+#[cfg(unix)]
 fn exchange<S: Read + Write>(mut stream: S, request: &str) -> std::io::Result<String> {
     stream.write_all(request.as_bytes())?;
     stream.write_all(b"\n")?;
