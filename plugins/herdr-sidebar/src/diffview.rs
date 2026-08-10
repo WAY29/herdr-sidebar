@@ -36,11 +36,14 @@ fn parse_events(diff: &str) -> Vec<Ev> {
     let mut old_no = 0usize;
     let mut new_no = 0usize;
     let mut seen_hunk = false;
+    let mut in_hunk = false;
     for line in diff.lines() {
-        if line.starts_with("diff --git")
+        if line.starts_with("diff --git") {
+            in_hunk = false;
+        }
+        if (!in_hunk && (line.starts_with("--- ") || line.starts_with("+++ ")))
+            || line.starts_with("diff --git")
             || line.starts_with("index ")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
             || line.starts_with("old mode")
             || line.starts_with("new mode")
             || line.starts_with("similarity")
@@ -53,6 +56,7 @@ fn parse_events(diff: &str) -> Vec<Ev> {
             continue;
         }
         if line.starts_with("@@") {
+            in_hunk = true;
             for tok in line.split_whitespace() {
                 let (sign, rest) = match tok.split_at_checked(1) {
                     Some(pair) => pair,
@@ -299,6 +303,28 @@ mod tests {
             .iter()
             .all(|s| s.style.bg != Some(ADD_WORD_BG));
         assert!(plain_add);
+    }
+
+    #[test]
+    fn deleted_line_starting_with_dashes_does_not_desync_gutters() {
+        // A deleted SQL/Lua-style "-- comment" line looks exactly like a
+        // "--- a/file" header if the parser isn't hunk-aware.
+        let diff = concat!(
+            "diff --git a/q.sql b/q.sql\n",
+            "index 111..222 100644\n",
+            "--- a/q.sql\n",
+            "+++ b/q.sql\n",
+            "@@ -1,3 +1,2 @@\n",
+            " SELECT 1;\n",
+            "--- trailing comment\n",
+            " SELECT 2;\n",
+        );
+        let lines = render("q.sql", diff);
+        assert_eq!(lines.len(), 3, "the deleted comment line must render");
+        assert!(lines[0].to_string().starts_with(" 1  1"));
+        assert!(lines[1].to_string().contains("-- trailing comment"));
+        // Old-side numbering must not skip: line 3 is old line 3, not 2.
+        assert!(lines[2].to_string().starts_with(" 3  2"));
     }
 
     #[test]

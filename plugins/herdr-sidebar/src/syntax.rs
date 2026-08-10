@@ -13,6 +13,12 @@ use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+/// Lines longer than this skip highlighting entirely. syntect's `regex-fancy`
+/// backtracking engine is roughly quadratic in line length on pathological
+/// input (minified JS/CSS, generated data) — a single multi-hundred-KB line
+/// can take tens of seconds and freeze the render thread.
+const MAX_HIGHLIGHT_LINE_LEN: usize = 2000;
+
 /// Grammar + theme assets, loaded once (the bundled dumps take a few ms).
 fn assets() -> &'static (SyntaxSet, Theme) {
     static ASSETS: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
@@ -41,6 +47,10 @@ pub fn highlight(name: &str, text: &str, max: usize) -> Option<Vec<Line<'static>
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut lines = Vec::new();
     for raw in LinesWithEndings::from(text).take(max) {
+        if raw.len() > MAX_HIGHLIGHT_LINE_LEN {
+            lines.push(Line::raw(raw.trim_end_matches(['\n', '\r']).to_string()));
+            continue;
+        }
         let Ok(regions) = highlighter.highlight_line(raw, syntaxes) else {
             lines.push(Line::raw(raw.trim_end_matches(['\n', '\r']).to_string()));
             continue;
@@ -89,6 +99,9 @@ impl LineHighlighter {
         let Some(hl) = self.inner.as_mut() else {
             return vec![Span::raw(text.to_string())];
         };
+        if text.len() > MAX_HIGHLIGHT_LINE_LEN {
+            return vec![Span::raw(text.to_string())];
+        }
         let (syntaxes, _) = assets();
         let with_nl = format!("{text}\n");
         match hl.highlight_line(&with_nl, syntaxes) {
@@ -144,5 +157,18 @@ name = \"x\"
     #[test]
     fn unknown_extensions_fall_back_to_none() {
         assert!(highlight("data.qqzz", "gibberish content\n", 10).is_none());
+    }
+
+    #[test]
+    fn pathologically_long_lines_skip_highlighting_instead_of_hanging() {
+        let long_line = format!("const x = \"{}\";\n", "a".repeat(MAX_HIGHLIGHT_LINE_LEN + 1));
+        let lines = highlight("bundle.min.js", &long_line, 10).expect("js grammar matches");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), long_line.trim_end_matches('\n'));
+
+        let mut hl = LineHighlighter::new("bundle.min.js");
+        let spans = hl.line(long_line.trim_end_matches('\n'));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, long_line.trim_end_matches('\n'));
     }
 }
