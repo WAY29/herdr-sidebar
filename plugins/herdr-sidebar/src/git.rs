@@ -109,24 +109,36 @@ impl Git {
         run_in(&self.root, &["add", "-A"]).map(drop)
     }
 
+    /// Whether HEAD resolves to a real commit — false only on an unborn
+    /// branch (a repo with no commits yet), where `git reset` has nothing to
+    /// reset against.
+    fn has_head(&self) -> bool {
+        run_in(&self.root, &["rev-parse", "--verify", "HEAD"]).is_ok()
+    }
+
     /// Unstage one entry. `reset` needs a HEAD to reset against; on an unborn
     /// branch (no commits yet) fall back to dropping the path from the index.
+    /// The fallback is destructive on a repo WITH a HEAD (`rm --cached` stages
+    /// a deletion instead of unstaging), so it only runs for the unborn-branch
+    /// case — any other `reset` failure is propagated instead of swallowed.
     pub fn unstage(&self, entry: &FileEntry) -> Result<(), String> {
         let mut args = vec!["reset", "-q", "--", entry.path.as_str()];
         if let Some(orig) = &entry.orig {
             args.push(orig);
         }
-        if run_in(&self.root, &args).is_ok() {
-            return Ok(());
+        match run_in(&self.root, &args) {
+            Ok(_) => Ok(()),
+            Err(e) if self.has_head() => Err(e),
+            Err(_) => run_in(&self.root, &["rm", "--cached", "-r", "-q", "--", &entry.path]).map(drop),
         }
-        run_in(&self.root, &["rm", "--cached", "-r", "-q", "--", &entry.path]).map(drop)
     }
 
     pub fn unstage_all(&self) -> Result<(), String> {
-        if run_in(&self.root, &["reset", "-q"]).is_ok() {
-            return Ok(());
+        match run_in(&self.root, &["reset", "-q"]) {
+            Ok(_) => Ok(()),
+            Err(e) if self.has_head() => Err(e),
+            Err(_) => run_in(&self.root, &["rm", "--cached", "-r", "-q", "--", "."]).map(drop),
         }
-        run_in(&self.root, &["rm", "--cached", "-r", "-q", "--", "."]).map(drop)
     }
 
     /// Commit the staged changes; returns git's summary line ("[branch abc1234] …").
@@ -430,6 +442,55 @@ mod tests {
         names.sort();
         assert_eq!(names, ["a", "b"]);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A fresh repo with one commit on `main`, so HEAD resolves.
+    fn repo_with_head(name: &str) -> Git {
+        let root = std::env::temp_dir().join(format!("aa-git-unstage-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["-c", "user.email=t@t.dev", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"][..],
+        ] {
+            std::process::Command::new("git").args(args).current_dir(&root).output().unwrap();
+        }
+        Git { root }
+    }
+
+    #[test]
+    fn unstage_all_propagates_reset_failure_instead_of_destructive_fallback_when_head_exists() {
+        let git = repo_with_head("unstage-all");
+        std::fs::write(git.root.join("file.txt"), "v1").unwrap();
+        run_in(&git.root, &["add", "-A"]).unwrap();
+        // Force `git reset` to fail deterministically without touching HEAD.
+        std::fs::write(git.root.join(".git/index.lock"), "").unwrap();
+        let result = git.unstage_all();
+        std::fs::remove_file(git.root.join(".git/index.lock")).unwrap();
+        assert!(result.is_err(), "a real reset failure must not report success");
+        let status = git.status().unwrap();
+        assert_eq!(status.staged.len(), 1, "file must still be staged, untouched");
+        assert_eq!(status.staged[0].letter, 'A', "must still be a staged add, not a staged deletion");
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn unstage_all_falls_back_on_a_genuinely_unborn_branch() {
+        let root = std::env::temp_dir()
+            .join(format!("aa-git-unstage-unborn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).output().unwrap();
+        std::fs::write(root.join("file.txt"), "v1").unwrap();
+        let git = Git { root: root.clone() };
+        run_in(&git.root, &["add", "-A"]).unwrap();
+        // No commits yet: `git reset` has no HEAD to reset against.
+        assert!(!git.has_head());
+        assert!(git.unstage_all().is_ok());
+        let status = git.status().unwrap();
+        assert_eq!(status.staged, vec![]);
+        assert_eq!(status.unstaged, vec![entry("file.txt", 'U', None)]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

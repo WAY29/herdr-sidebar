@@ -21,6 +21,13 @@ for ws in workspaces:
             print("closed", wid, pane["pane_id"], pane.get("label"))
 ' "$HERDR_BIN"
 
-pkill -f 'herdr-sidebar' 2>/dev/null
+# Match by process NAME, not full command line: `-f` would also kill
+# launcher scripts (open-sidebar.sh etc.) and unrelated processes whose argv
+# happens to contain the plugin path. Both Linux and macOS truncate `comm`
+# to 15 visible characters, so `herdr-sidebar-ensure` (20 chars) shows up
+# truncated as `herdr-sidebar-e` — match all three forms.
+pkill -x 'herdr-sidebar' 2>/dev/null
+pkill -x 'herdr-sidebar-ensure' 2>/dev/null
+pkill -x 'herdr-sidebar-e' 2>/dev/null
 "$HERDR_BIN" plugin action invoke herdr-sidebar.open-sidebar >/dev/null 2>&1
 echo 'redeploy complete - other workspaces re-dock on next focus'
