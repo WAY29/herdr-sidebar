@@ -12,6 +12,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 bin="$script_dir/../target/release/herdr-sidebar"
 [ -x "$bin" ] || exit 0
 
+# "Auto-open sidebar: off" (⚙ Settings): hooks leave closed tabs alone; only
+# the explicit open-sidebar toggle docks one (issue #8). Checked before the
+# lock so a disabled hook never contends with a user toggle.
+[ "$("$bin" --auto-open 2>/dev/null || echo on)" = "off" ] && exit 0
+
 # Focus events arrive in bursts (tab.focused + workspace.focused for one switch)
 # and concurrent ensures each open an explorer — serialize with an atomic mkdir
 # lock. Losing the race skips this ensure; the next focus event re-fires it.

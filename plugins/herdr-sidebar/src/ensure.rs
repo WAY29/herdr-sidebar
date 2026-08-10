@@ -44,6 +44,12 @@ use crate::snooze;
 /// focus, and respecting a tab the user toggled closed. Toggle mode (the
 /// action): open-or-focus-or-close, like VS Code's explorer shortcut.
 pub fn run(toggle: bool) -> std::io::Result<()> {
+    // Auto-open off (⚙ Settings): hooks leave closed tabs alone; the user's
+    // explicit toggle still works. The unix hook script makes the same check
+    // via `herdr-sidebar --auto-open`.
+    if !toggle && !crate::state::load_state().auto_open {
+        return Ok(());
+    }
     let Some(_lock) = Lock::acquire() else {
         return Ok(());
     };

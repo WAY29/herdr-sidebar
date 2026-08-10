@@ -62,6 +62,8 @@ A real tree, not a directory dump:
   only — hands the file to the OS-associated app, like a double click in the file
   manager), Rename, Delete, Copy Path / Relative Path, Reveal in File Explorer.
 - Dotfiles toggle, live refresh, and a collapse-to-sliver mode when you want the columns back.
+- Prefer the sidebar closed? Toggle "Auto-open sidebar" off in ⚙ Settings and it stays
+  closed until you invoke the open-sidebar action yourself.
 
 ### 🔀 Source Control
 
