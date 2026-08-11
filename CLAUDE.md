@@ -93,11 +93,11 @@ cargo clippy -- -D warnings
   `herdr plugin action invoke herdr-sidebar.redeploy-windows` after rebuilding: it closes
   every herdr-aa pane in every workspace, kills stragglers, and re-docks the focused workspace;
   the others re-dock via the focus hook the moment they're next visited.
-- **os error 5 can come from the OTHER account**: the Alex-CCS herdr session runs sidebar
-  panes from this SAME checkout. Its processes show empty Path/StartTime in `Get-Process`,
-  `Stop-Process` fails silently on them, and redeploy from this account can't reach them —
-  the lock only clears when the Alex-CCS herdr session restarts. Rename-aside (above) still
-  unblocks the build.
+- **os error 5 can come from ANOTHER Windows account**: if a second account's herdr session
+  runs sidebar panes from this same checkout, its processes show empty Path/StartTime in
+  `Get-Process`, `Stop-Process` fails silently on them, and redeploy from this account can't
+  reach them — the lock only clears when that other session restarts. Rename-aside (above)
+  still unblocks the build.
 
 ### Release flow (verified for v0.7.0)
 
