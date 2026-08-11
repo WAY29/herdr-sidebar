@@ -93,6 +93,39 @@ cargo clippy -- -D warnings
   `herdr plugin action invoke herdr-sidebar.redeploy-windows` after rebuilding: it closes
   every herdr-aa pane in every workspace, kills stragglers, and re-docks the focused workspace;
   the others re-dock via the focus hook the moment they're next visited.
+- **os error 5 can come from the OTHER account**: the Alex-CCS herdr session runs sidebar
+  panes from this SAME checkout. Its processes show empty Path/StartTime in `Get-Process`,
+  `Stop-Process` fails silently on them, and redeploy from this account can't reach them —
+  the lock only clears when the Alex-CCS herdr session restarts. Rename-aside (above) still
+  unblocks the build.
+
+### Release flow (verified for v0.7.0)
+
+- Bump the version in THREE files: `Cargo.toml`, `herdr-plugin.toml`, and `Cargo.lock`
+  (any cargo command regenerates the lock entry). Commit as `vX.Y.Z`, `git tag vX.Y.Z`,
+  push branch + tag.
+- **Pushing a tag alone does NOT update the repo's "Latest" release badge** — also run
+  `gh release create vX.Y.Z --title vX.Y.Z --notes-file <md>`. House style for notes: a
+  headline `##`, Fixes/New sections referencing issue/PR numbers and crediting contributor
+  handles, and the `herdr plugin install alexarthurs/herdr-sidebar/plugins/herdr-sidebar`
+  snippet at the end.
+- Merging contributor PRs locally (`git fetch origin pull/N/head:pr-N`, `git merge --no-ff
+  pr-N`, push main) marks them MERGED on GitHub, and `Fixes #N`/`Closes #N` in commit
+  messages auto-close the issues on push. Branch protection ("changes must be made through
+  a pull request") is bypassable as repo admin — the push prints a rule-violation warning
+  but succeeds.
+
+### Testing hooks headless (no TUI attached)
+
+- Bare `herdr server` STARTS a foreground server (it does not print help) and restores the
+  persisted session — all workspaces and panes respawn. Handy for exercising plugin hooks
+  from a script; test in throwaway workspaces and close them after.
+- The ensure hooks only dock into the FOCUSED tab: `workspace create --no-focus` fires
+  workspace.created but nothing docks until `herdr workspace focus <id>`. With no TUI
+  client attached, focus changes are invisible to the user — still restore the previous
+  focus when done.
+- Drive the live TUI for verification with `pane send-keys <id> s` (⚙ Settings) etc., then
+  `pane read <id> --source visible` to assert on the rendered modal.
 
 ### herdr behavior findings (verified live against herdr 0.7.1)
 
