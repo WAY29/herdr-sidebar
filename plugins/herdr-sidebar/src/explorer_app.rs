@@ -15,10 +15,12 @@ use ratatui::widgets::{Clear, List, ListItem, Paragraph};
 use herdr_sidebar::actions::{self, MenuAction, MenuEntry};
 use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::state::{self as sidebar, View};
+use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
-    TitleAction, activity_icons, draw_scrollbar, gear_icon, hits, hits_collapse_button,
-    input_tail, sibling_panes_of, title_action_spans, title_actions_visible,
-    title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
+    TitleAction, activity_icons, draw_option_picker, draw_scrollbar, gear_icon, hits,
+    hits_collapse_button, input_tail, option_picker_index, sibling_panes_of,
+    title_action_spans, title_actions_visible, title_actions_width, truncate_to,
+    wrap_footer_message, wrap_hints,
 };
 use herdr_sidebar::tree::{Row, Tree};
 
@@ -132,6 +134,11 @@ enum Overlay {
         selected: usize,
         rect: Rect,
     },
+    ThemePicker {
+        selected: usize,
+        scroll: usize,
+        rect: Rect,
+    },
 }
 
 /// One row of the Settings modal.
@@ -139,6 +146,7 @@ enum Overlay {
 enum Setting {
     UnifiedSidebar,
     IconTheme,
+    DiffTheme,
     AutoOpen,
     HiddenFiles,
     Hotkeys,
@@ -222,17 +230,17 @@ impl App {
     pub fn new(root: PathBuf) -> Self {
         let mut tree = Tree::new(root);
         let rows = tree.rows();
+        let sidebar_state = sidebar::load_state();
         let theme = IconTheme::resolve(
             std::env::var("HERDR_SIDEBAR_ICONS")
                 .or_else(|_| std::env::var("HERDR_AA_FILETREE_ICONS"))
                 .ok()
                 .as_deref(),
-            sidebar::load_state().icons,
+            sidebar_state.icons,
         );
         let pane_ctl = PaneCtl::from_env();
         // The other view ships in this same binary — always available.
         let other_exe = std::env::current_exe().ok();
-        let sidebar_state = sidebar::load_state();
         let app = Self {
             tree,
             rows,
@@ -279,6 +287,10 @@ impl App {
     /// The merged sidebar is on and actually usable (other plugin present).
     fn merged(&self) -> bool {
         self.sidebar_state.merged && self.other_exe.is_some()
+    }
+
+    pub fn has_overlay(&self) -> bool {
+        self.overlay.is_some()
     }
 
     /// The label this pane should carry while expanded.
@@ -595,10 +607,42 @@ impl App {
             Activate,
             ConfirmPrompt,
             ToggleSetting(usize),
+            BackToSettings,
+            ChooseTheme(usize),
             DeleteConfirmed(PathBuf, bool),
         }
         let row_count = self.settings_rows().len();
+        let theme_count = syntax::diff_themes().len();
         let cmd = match self.overlay.as_mut() {
+            Some(Overlay::ThemePicker { selected, .. }) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => Cmd::BackToSettings,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                    Cmd::Nothing
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(theme_count.saturating_sub(1));
+                    Cmd::Nothing
+                }
+                KeyCode::PageUp => {
+                    *selected = selected.saturating_sub(10);
+                    Cmd::Nothing
+                }
+                KeyCode::PageDown => {
+                    *selected = (*selected + 10).min(theme_count.saturating_sub(1));
+                    Cmd::Nothing
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    *selected = 0;
+                    Cmd::Nothing
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    *selected = theme_count.saturating_sub(1);
+                    Cmd::Nothing
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => Cmd::ChooseTheme(*selected),
+                _ => Cmd::Nothing,
+            },
             Some(Overlay::Settings { selected, .. }) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => Cmd::Close,
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -652,6 +696,8 @@ impl App {
             Cmd::Activate => self.activate_menu_entry(),
             Cmd::ConfirmPrompt => self.confirm_prompt(),
             Cmd::ToggleSetting(index) => self.toggle_setting(index),
+            Cmd::BackToSettings => self.open_settings_at(Setting::DiffTheme),
+            Cmd::ChooseTheme(index) => self.choose_diff_theme(index),
             Cmd::DeleteConfirmed(path, is_dir) => {
                 self.overlay = None;
                 match actions::delete(&path, is_dir) {
@@ -668,10 +714,45 @@ impl App {
             Close,
             Activate,
             ToggleSetting(usize),
+            BackToSettings,
+            ChooseTheme(usize),
             Reopen(u16, u16),
         }
         let row_count = self.settings_rows().len();
+        let theme_count = syntax::diff_themes().len();
         let cmd = match self.overlay.as_mut() {
+            Some(Overlay::ThemePicker { selected, scroll, rect }) => match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some(index) =
+                        option_picker_index(*rect, *scroll, mouse.column, mouse.row, theme_count)
+                    {
+                        *selected = index;
+                    }
+                    Cmd::Nothing
+                }
+                MouseEventKind::ScrollUp => {
+                    *selected = selected.saturating_sub(3);
+                    Cmd::Nothing
+                }
+                MouseEventKind::ScrollDown => {
+                    *selected = (*selected + 3).min(theme_count.saturating_sub(1));
+                    Cmd::Nothing
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    match option_picker_index(
+                        *rect,
+                        *scroll,
+                        mouse.column,
+                        mouse.row,
+                        theme_count,
+                    ) {
+                        Some(index) => Cmd::ChooseTheme(index),
+                        None if hits(*rect, mouse.column, mouse.row) => Cmd::Nothing,
+                        None => Cmd::BackToSettings,
+                    }
+                }
+                _ => Cmd::Nothing,
+            },
             Some(Overlay::Settings { selected, rect }) => {
                 // Rows start just inside the top border (the title renders ON
                 // the border, not on its own line).
@@ -749,6 +830,8 @@ impl App {
             Cmd::Close => self.overlay = None,
             Cmd::Activate => self.activate_menu_entry(),
             Cmd::ToggleSetting(index) => self.toggle_setting(index),
+            Cmd::BackToSettings => self.open_settings_at(Setting::DiffTheme),
+            Cmd::ChooseTheme(index) => self.choose_diff_theme(index),
             Cmd::Reopen(x, y) => {
                 self.overlay = None;
                 self.open_context_menu(x, y);
@@ -760,6 +843,24 @@ impl App {
 
     fn open_settings(&mut self) {
         self.overlay = Some(Overlay::Settings { selected: 0, rect: Rect::default() });
+    }
+
+    fn open_settings_at(&mut self, setting: Setting) {
+        let selected = self
+            .settings_rows()
+            .iter()
+            .position(|row| row.0 == setting)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::Settings { selected, rect: Rect::default() });
+    }
+
+    fn open_theme_picker(&mut self) {
+        let selected = syntax::diff_theme_index(self.sidebar_state.diff_theme);
+        self.overlay = Some(Overlay::ThemePicker {
+            selected,
+            scroll: selected.saturating_sub(5),
+            rect: Rect::default(),
+        });
     }
 
     /// The modal's rows for the current state.
@@ -779,6 +880,12 @@ impl App {
                     IconTheme::Emoji => "emoji",
                 }
                 .to_string(),
+                true,
+            ),
+            (
+                Setting::DiffTheme,
+                "Diff theme",
+                truncate_to(self.sidebar_state.diff_theme.as_name().to_string(), 15),
                 true,
             ),
             (
@@ -823,6 +930,7 @@ impl App {
                 self.set_unified(on);
             }
             Setting::IconTheme => self.set_theme(self.theme.toggled()),
+            Setting::DiffTheme => self.open_theme_picker(),
             Setting::HiddenFiles => {
                 self.tree.show_hidden = !self.tree.show_hidden;
                 self.rebuild();
@@ -840,6 +948,13 @@ impl App {
                 self.change_folder_dialog();
             }
         }
+    }
+
+    fn choose_diff_theme(&mut self, index: usize) {
+        let Some(theme) = syntax::diff_themes().get(index).copied() else { return };
+        self.sidebar_state.diff_theme = theme;
+        sidebar::save_state(self.sidebar_state);
+        self.open_settings_at(Setting::DiffTheme);
     }
 
     /// Render the centered Settings popup and remember its rect for clicks.
@@ -890,6 +1005,15 @@ impl App {
             ),
             popup,
         );
+    }
+
+    fn draw_theme_picker(&mut self, frame: &mut Frame) {
+        let options = syntax::diff_themes().iter().map(|theme| theme.as_name()).collect::<Vec<_>>();
+        let Some(Overlay::ThemePicker { selected, scroll, rect }) = self.overlay.as_mut() else {
+            return;
+        };
+        let area = Rect::new(0, 0, self.last_width, self.last_height);
+        *rect = draw_option_picker(frame, area, "Diff theme", &options, *selected, scroll);
     }
 
     fn activate_menu_entry(&mut self) {
@@ -1339,6 +1463,7 @@ impl App {
         match self.overlay {
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
             Some(Overlay::Settings { .. }) => self.draw_settings(frame),
+            Some(Overlay::ThemePicker { .. }) => self.draw_theme_picker(frame),
             _ => {}
         }
     }

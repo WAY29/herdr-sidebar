@@ -23,6 +23,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::ansi;
 use crate::icons::{IconTheme, icon};
 use crate::ipc;
+use crate::syntax::DiffTheme;
 
 /// Metadata source/token that marks the viewer pane, so the sidebar can find
 /// and reuse it (distinct from the sidebar's own identity tokens).
@@ -146,10 +147,10 @@ struct Doc {
     scroll: usize,
 }
 
-fn load(request: &Request) -> Doc {
+fn load(request: &Request, diff_theme: DiffTheme) -> Doc {
     match request {
-        Request::File(path) => load_file(path),
-        Request::Diff { root, rel, kind } => load_diff(root, rel, kind),
+        Request::File(path) => load_file(path, diff_theme),
+        Request::Diff { root, rel, kind } => load_diff(root, rel, kind, diff_theme),
         Request::Show { root, spec, path } => load_show(root, spec, path.as_deref()),
     }
 }
@@ -235,7 +236,7 @@ fn glow_markdown(text: &str, width: u16) -> Option<Vec<Line<'static>>> {
     Some(lines)
 }
 
-fn load_file(target: &Path) -> Doc {
+fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
     let name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -263,9 +264,13 @@ fn load_file(target: &Path) -> Doc {
                 let mut lines: Vec<Line<'static>> = if let Some(rendered) = glow_rendered {
                     rendered
                 } else {
-                    crate::syntax::highlight(&name, &text, MAX_LINES).unwrap_or_else(|| {
-                        text.lines().take(MAX_LINES).map(|l| Line::raw(l.to_string())).collect()
-                    })
+                    crate::syntax::highlight(&name, &text, MAX_LINES, diff_theme)
+                        .unwrap_or_else(|| {
+                            text.lines()
+                                .take(MAX_LINES)
+                                .map(|l| Line::raw(l.to_string()))
+                                .collect()
+                        })
                 };
                 if truncated || text.lines().count() > MAX_LINES {
                     lines.push(Line::raw("… (truncated)"));
@@ -286,7 +291,7 @@ fn load_file(target: &Path) -> Doc {
     }
 }
 
-fn load_diff(root: &Path, rel: &str, kind: &str) -> Doc {
+fn load_diff(root: &Path, rel: &str, kind: &str, diff_theme: DiffTheme) -> Doc {
     let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
     // Plain (uncolored) diff: crate::diffview parses it and renders the
     // editor look — line gutter, tinted rows, syntax-highlighted code.
@@ -321,7 +326,7 @@ fn load_diff(root: &Path, rel: &str, kind: &str) -> Doc {
                     vec![Line::raw(format!("({})", err.trim()))]
                 }
             } else {
-                crate::diffview::render(rel, &text)
+                crate::diffview::render(rel, &text, diff_theme)
             }
         }
     };
@@ -415,6 +420,7 @@ pub struct InlinePreview {
     current: Option<Request>,
     doc: Option<Doc>,
     theme: IconTheme,
+    diff_theme: DiffTheme,
     sidebar_width: u16,
     area: Rect,
     last_refresh: Instant,
@@ -431,6 +437,7 @@ impl InlinePreview {
         if let Some(control) = &control {
             let _ = std::fs::remove_file(control);
         }
+        let state = crate::state::load_state();
         Self {
             owner,
             control,
@@ -441,8 +448,9 @@ impl InlinePreview {
                     .or_else(|_| std::env::var("HERDR_AA_FILETREE_ICONS"))
                     .ok()
                     .as_deref(),
-                crate::state::load_state().icons,
+                state.icons,
             ),
+            diff_theme: state.diff_theme,
             sidebar_width: 30,
             area: Rect::default(),
             last_refresh: Instant::now(),
@@ -467,7 +475,8 @@ impl InlinePreview {
             return;
         }
         self.sidebar_width = width.max(1);
-        self.doc = Some(load(&request));
+        self.diff_theme = crate::state::load_state().diff_theme;
+        self.doc = Some(load(&request, self.diff_theme));
         self.current = Some(request);
         self.last_refresh = Instant::now();
     }
@@ -549,6 +558,11 @@ impl InlinePreview {
     }
 
     pub fn tick(&mut self) {
+        let selected_theme = crate::state::load_state().diff_theme;
+        if selected_theme != self.diff_theme {
+            self.diff_theme = selected_theme;
+            self.reload_current();
+        }
         if self.last_refresh.elapsed() < Duration::from_secs(2) {
             return;
         }
@@ -557,9 +571,18 @@ impl InlinePreview {
             return;
         };
         let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
-        let mut doc = load(request);
+        let mut doc = load(request, self.diff_theme);
         doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
         self.doc = Some(doc);
+    }
+
+    fn reload_current(&mut self) {
+        let Some(request) = self.current.as_ref() else { return };
+        let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
+        let mut doc = load(request, self.diff_theme);
+        doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
+        self.doc = Some(doc);
+        self.last_refresh = Instant::now();
     }
 
     fn close(&mut self) {
@@ -588,15 +611,20 @@ impl Drop for InlinePreview {
 
 /// The viewer's event loop; returns when the user closes it.
 pub fn run(control: &Path) -> std::io::Result<()> {
+    let state = crate::state::load_state();
     let theme = IconTheme::resolve(
         std::env::var("HERDR_SIDEBAR_ICONS")
             .or_else(|_| std::env::var("HERDR_AA_FILETREE_ICONS"))
             .ok()
             .as_deref(),
-        crate::state::load_state().icons,
+        state.icons,
     );
+    let mut diff_theme = state.diff_theme;
     let mut current = read_control(control);
-    let mut doc = current.as_ref().map(load).unwrap_or_else(|| Doc {
+    let mut doc = current
+        .as_ref()
+        .map(|request| load(request, diff_theme))
+        .unwrap_or_else(|| Doc {
         name: "(nothing to show)".into(),
         context: String::new(),
         lines: vec![Line::raw("(waiting for a click in the sidebar)")],
@@ -662,14 +690,16 @@ pub fn run(control: &Path) -> std::io::Result<()> {
             if target != current {
                 current = target;
                 if let Some(request) = &current {
-                    doc = load(request);
+                    diff_theme = crate::state::load_state().diff_theme;
+                    doc = load(request, diff_theme);
                     report_identity(&doc.name);
                 }
             } else if beat.is_multiple_of(8)
                 && let Some(request @ Request::Diff { .. }) = &current
             {
                 let keep = doc.scroll;
-                doc = load(request);
+                diff_theme = crate::state::load_state().diff_theme;
+                doc = load(request, diff_theme);
                 doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
             }
         }

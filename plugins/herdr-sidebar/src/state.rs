@@ -6,6 +6,7 @@
 //! - `merged`: the unified sidebar is on (survives restarts).
 //! - `active`: the view shown last, so a fresh sidebar opens where the user
 //!   left off.
+//! - `diff_theme`: syntax colors used by file previews and SCM diffs.
 //!
 //! Both views live in ONE binary; switching is an in-process re-render, and
 //! separated panes are the same binary pinned to a starting view with
@@ -114,6 +115,8 @@ pub struct State {
     /// probe). Set the moment they toggle `i` or the Settings row, so a
     /// wrong auto-guess is corrected once and stays corrected.
     pub icons: Option<crate::icons::IconTheme>,
+    /// Syntax colors used by file previews and SCM diffs.
+    pub diff_theme: crate::syntax::DiffTheme,
     /// The first-run "install a Nerd Font?" prompt was answered (either
     /// way) — never show it again.
     pub font_prompt_done: bool,
@@ -131,6 +134,7 @@ impl Default for State {
             active: View::Explorer,
             show_hotkeys: false,
             icons: None,
+            diff_theme: crate::syntax::DEFAULT_DIFF_THEME,
             font_prompt_done: false,
             auto_open: true,
         }
@@ -208,10 +212,11 @@ pub fn save_state(state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"font_prompt\":{},\"auto_open\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"diff_theme\":\"{}\",\"font_prompt\":{},\"auto_open\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.show_hotkeys,
+        state.diff_theme.as_name(),
         state.font_prompt_done,
         state.auto_open
     );
@@ -241,6 +246,11 @@ pub fn parse_state(json: &str) -> State {
             .get("icons")
             .and_then(|v| v.as_str())
             .and_then(crate::icons::IconTheme::from_state_name),
+        diff_theme: value
+            .get("diff_theme")
+            .and_then(|v| v.as_str())
+            .and_then(crate::syntax::diff_theme_from_name)
+            .unwrap_or(default.diff_theme),
         font_prompt_done: value
             .get("font_prompt")
             .and_then(|v| v.as_bool())
@@ -263,10 +273,11 @@ mod tests {
             active: View::SourceControl,
             show_hotkeys: true,
             icons: Some(crate::icons::IconTheme::Emoji),
+            diff_theme: crate::syntax::DiffTheme::Nord,
             font_prompt_done: true,
             auto_open: false,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"font_prompt\":true,\"auto_open\":false,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"diff_theme\":\"Nord\",\"font_prompt\":true,\"auto_open\":false,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open on.

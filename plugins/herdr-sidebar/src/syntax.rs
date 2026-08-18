@@ -9,10 +9,28 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme};
+use syntect::highlighting::FontStyle;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-use two_face::theme::EmbeddedThemeName;
+use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
+
+pub type DiffTheme = EmbeddedThemeName;
+pub const DEFAULT_DIFF_THEME: DiffTheme = EmbeddedThemeName::CatppuccinMocha;
+
+pub fn diff_themes() -> &'static [DiffTheme] {
+    EmbeddedLazyThemeSet::theme_names()
+}
+
+pub fn diff_theme_from_name(name: &str) -> Option<DiffTheme> {
+    diff_themes()
+        .iter()
+        .copied()
+        .find(|theme| theme.as_name() == name)
+}
+
+pub fn diff_theme_index(theme: DiffTheme) -> usize {
+    diff_themes().iter().position(|candidate| *candidate == theme).unwrap_or(0)
+}
 
 /// Lines longer than this skip highlighting entirely. syntect's `regex-fancy`
 /// backtracking engine is roughly quadratic in line length on pathological
@@ -21,21 +39,21 @@ use two_face::theme::EmbeddedThemeName;
 const MAX_HIGHLIGHT_LINE_LEN: usize = 2000;
 
 /// Grammar + theme assets, loaded once (the bundled dumps take a few ms).
-fn assets() -> &'static (SyntaxSet, Theme) {
-    static ASSETS: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
-    ASSETS.get_or_init(|| {
-        let syntaxes = two_face::syntax::extra_newlines();
-        let theme = two_face::theme::extra()
-            .get(EmbeddedThemeName::CatppuccinMocha)
-            .clone();
-        (syntaxes, theme)
-    })
+fn assets() -> &'static (SyntaxSet, EmbeddedLazyThemeSet) {
+    static ASSETS: OnceLock<(SyntaxSet, EmbeddedLazyThemeSet)> = OnceLock::new();
+    ASSETS.get_or_init(|| (two_face::syntax::extra_newlines(), two_face::theme::extra()))
 }
 
 /// Highlight `text` for a file called `name`, up to `max` lines. `None` when
 /// no grammar matches (caller falls back to plain lines).
-pub fn highlight(name: &str, text: &str, max: usize) -> Option<Vec<Line<'static>>> {
-    let (syntaxes, theme) = assets();
+pub fn highlight(
+    name: &str,
+    text: &str,
+    max: usize,
+    diff_theme: DiffTheme,
+) -> Option<Vec<Line<'static>>> {
+    let (syntaxes, themes) = assets();
+    let theme = themes.get(diff_theme);
     let ext = name.rsplit('.').next().unwrap_or("");
     let syntax = syntaxes
         .find_syntax_by_extension(ext)
@@ -83,8 +101,9 @@ pub struct LineHighlighter {
 }
 
 impl LineHighlighter {
-    pub fn new(name: &str) -> Self {
-        let (syntaxes, theme) = assets();
+    pub fn new(name: &str, diff_theme: DiffTheme) -> Self {
+        let (syntaxes, themes) = assets();
+        let theme = themes.get(diff_theme);
         let ext = name.rsplit('.').next().unwrap_or("");
         let syntax = syntaxes
             .find_syntax_by_extension(ext)
@@ -132,7 +151,8 @@ mod tests {
 
     #[test]
     fn known_extensions_highlight_with_colors() {
-        let lines = highlight("main.rs", "fn main() {}\n", 10).expect("rust grammar");
+        let lines = highlight("main.rs", "fn main() {}\n", 10, DEFAULT_DIFF_THEME)
+            .expect("rust grammar");
         assert_eq!(lines.len(), 1);
         // The `fn` keyword must carry a non-default foreground color.
         let colored = lines[0]
@@ -146,27 +166,38 @@ mod tests {
     #[test]
     fn extended_grammars_cover_typescript_and_toml() {
         assert!(highlight("app.ts", "const x: string = \"hi\";
-", 10).is_some());
+", 10, DEFAULT_DIFF_THEME).is_some());
         assert!(highlight("Cargo.toml", "[package]
 name = \"x\"
-", 10).is_some());
+", 10, DEFAULT_DIFF_THEME).is_some());
     }
 
     #[test]
     fn unknown_extensions_fall_back_to_none() {
-        assert!(highlight("data.qqzz", "gibberish content\n", 10).is_none());
+        assert!(highlight("data.qqzz", "gibberish content\n", 10, DEFAULT_DIFF_THEME).is_none());
     }
 
     #[test]
     fn pathologically_long_lines_skip_highlighting_instead_of_hanging() {
         let long_line = format!("const x = \"{}\";\n", "a".repeat(MAX_HIGHLIGHT_LINE_LEN + 1));
-        let lines = highlight("bundle.min.js", &long_line, 10).expect("js grammar matches");
+        let lines = highlight("bundle.min.js", &long_line, 10, DEFAULT_DIFF_THEME)
+            .expect("js grammar matches");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].to_string(), long_line.trim_end_matches('\n'));
 
-        let mut hl = LineHighlighter::new("bundle.min.js");
+        let mut hl = LineHighlighter::new("bundle.min.js", DEFAULT_DIFF_THEME);
         let spans = hl.line(long_line.trim_end_matches('\n'));
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, long_line.trim_end_matches('\n'));
+    }
+
+    #[test]
+    fn diff_themes_roundtrip() {
+        let themes = diff_themes();
+        assert_eq!(themes.len(), 32);
+        for theme in themes {
+            assert_eq!(diff_theme_from_name(theme.as_name()), Some(*theme));
+            assert_eq!(themes[diff_theme_index(*theme)], *theme);
+        }
     }
 }

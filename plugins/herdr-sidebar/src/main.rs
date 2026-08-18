@@ -151,7 +151,7 @@ fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit
         // still cheap for the heartbeat.
         if event::poll(Duration::from_millis(500))? {
             let exit = match event::read()? {
-                Event::Key(key) if preview.is_open() => {
+                Event::Key(key) if preview.is_open() && !app.has_overlay() => {
                     preview.on_key(key);
                     None
                 }
@@ -194,7 +194,7 @@ fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
         })?;
         if event::poll(REFRESH_EVERY)? {
             let exit = match event::read()? {
-                Event::Key(key) if preview.is_open() => {
+                Event::Key(key) if preview.is_open() && !app.has_overlay() => {
                     preview.on_key(key);
                     None
                 }

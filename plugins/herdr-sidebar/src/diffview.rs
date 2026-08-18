@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::syntax::LineHighlighter;
+use crate::syntax::{DiffTheme, LineHighlighter};
 
-/// Catppuccin Mocha layers, matching the preview syntax theme.
+/// Stable Catppuccin semantic layers; the selected Diff theme supplies code
+/// foregrounds while red/green remains recognizable across themes.
 const DEL_BG: Color = Color::Rgb(0x45, 0x23, 0x2f);
 const DEL_WORD_BG: Color = Color::Rgb(0x6e, 0x34, 0x46);
 const ADD_BG: Color = Color::Rgb(0x1f, 0x3a, 0x2a);
@@ -208,7 +209,7 @@ fn overlay_bg(spans: Vec<Span<'static>>, range: (usize, usize), bg: Color) -> Ve
 
 /// Render a unified diff for `rel` (its extension picks the grammar) into
 /// display lines: line number + change bar, tinted rows, highlighted code.
-pub fn render(rel: &str, diff: &str) -> Vec<Line<'static>> {
+pub fn render(rel: &str, diff: &str, diff_theme: DiffTheme) -> Vec<Line<'static>> {
     let evs = parse_events(diff);
     let ranges = word_ranges(&evs);
 
@@ -226,8 +227,8 @@ pub fn render(rel: &str, diff: &str) -> Vec<Line<'static>> {
 
     // Two stateful highlighters approximate the old and new file contexts,
     // so multi-line constructs mostly survive (the delta/bat trick).
-    let mut old_hl = LineHighlighter::new(rel);
-    let mut new_hl = LineHighlighter::new(rel);
+    let mut old_hl = LineHighlighter::new(rel, diff_theme);
+    let mut new_hl = LineHighlighter::new(rel, diff_theme);
 
     let gutter = |line: Option<usize>, mark: Option<Color>| {
         let line = line.map(|n| n.to_string()).unwrap_or_default();
@@ -287,6 +288,7 @@ pub fn render(rel: &str, diff: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax::DEFAULT_DIFF_THEME;
 
     // NOTE: no `\` line continuations — they would eat the leading space
     // that marks context lines.
@@ -305,7 +307,7 @@ mod tests {
 
     #[test]
     fn diff_parses_gutters_tints_and_word_ranges() {
-        let lines = render("app.ts", DIFF);
+        let lines = render("app.ts", DIFF, DEFAULT_DIFF_THEME);
         assert_eq!(lines.len(), 5);
         // Context row: one number, no tint.
         assert!(lines[0].to_string().starts_with(" 1   "));
@@ -344,7 +346,7 @@ mod tests {
             "--- trailing comment\n",
             " SELECT 2;\n",
         );
-        let lines = render("q.sql", diff);
+        let lines = render("q.sql", diff, DEFAULT_DIFF_THEME);
         assert_eq!(lines.len(), 3, "the deleted comment line must render");
         assert!(lines[0].to_string().starts_with(" 1   "));
         assert!(lines[1].to_string().contains("-- trailing comment"));
@@ -355,16 +357,24 @@ mod tests {
     #[test]
     fn hunk_boundaries_and_binary_lines_survive() {
         let two_hunks = "@@ -1,1 +1,1 @@\n ctx\n@@ -9,1 +9,1 @@\n ctx2\n";
-        let lines = render("x.rs", two_hunks);
+        let lines = render("x.rs", two_hunks, DEFAULT_DIFF_THEME);
         assert_eq!(lines.len(), 3);
         assert!(lines[1].to_string().contains("⋯  7 unmodified lines"));
-        let bin = render("x.bin", "Binary files a/x.bin and b/x.bin differ\n");
+        let bin = render(
+            "x.bin",
+            "Binary files a/x.bin and b/x.bin differ\n",
+            DEFAULT_DIFF_THEME,
+        );
         assert_eq!(bin.len(), 1);
     }
 
     #[test]
     fn leading_omitted_context_reports_the_fold_size() {
-        let lines = render("x.txt", "@@ -10,2 +10,2 @@\n-old\n+new\n same\n");
+        let lines = render(
+            "x.txt",
+            "@@ -10,2 +10,2 @@\n-old\n+new\n same\n",
+            DEFAULT_DIFF_THEME,
+        );
         assert_eq!(lines[0].to_string(), "    ⋯  9 unmodified lines");
     }
 }

@@ -470,9 +470,16 @@ HACKING.md — budget time for that before promising a patched build.
 - `syntect` with `regex-fancy` (pure Rust — the default oniguruma engine needs a C build
   that's pain on Windows). syntect's BUNDLED grammar set is Sublime's defaults and lacks
   TypeScript, TOML, Dockerfile and friends — `two-face` supplies bat's extended set
-  (`two_face::syntax::extra_newlines()`), themes still from syntect's `ThemeSet` (theme
-  data is grammar-independent). Foreground colors only: the terminal owns the background.
-  See `src/syntax.rs`; unknown extensions fall back to plain lines.
+  (`two_face::syntax::extra_newlines()`) and 32 embedded themes. Both Settings modals expose
+  them as **Diff theme**: Enter/click opens a scrollable picker, Up/Down (plus g/G and
+  PageUp/PageDown) navigates, and Enter/click applies the highlighted choice. The setting is
+  persisted as `diff_theme` in `state.json`; the default is Catppuccin Mocha. An open in-process
+  preview notices the persisted change on the same event-loop turn, reloads its current file/diff,
+  and preserves scroll position; separated panes pick it up on their next tick. The choice controls
+  code foregrounds in file previews and SCM diffs, while diff row/word backgrounds keep their fixed
+  red/green semantic colors. Foreground colors only: the terminal owns the base background, so light
+  themes depend on a compatible terminal palette. See `src/syntax.rs`; unknown extensions fall back
+  to plain lines.
 
 ### Verifying a plugin TUI end-to-end
 

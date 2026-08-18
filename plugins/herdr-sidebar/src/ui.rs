@@ -4,10 +4,12 @@
 //! these used to be copy-mirrored between two crates.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::layout::{Margin, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use crate::icons::IconTheme;
 use crate::state::View;
@@ -71,6 +73,87 @@ pub fn draw_scrollbar(frame: &mut Frame, area: Rect, total: usize, viewport: usi
         area,
         &mut state,
     );
+}
+
+/// Draw a centered, scrollable option list and return its popup rect for
+/// mouse hit-testing.
+pub fn draw_option_picker(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    options: &[&str],
+    selected: usize,
+    scroll: &mut usize,
+) -> Rect {
+    let widest = options.iter().map(|name| name.chars().count()).max().unwrap_or(0);
+    let width = u16::try_from(widest.saturating_add(4))
+        .unwrap_or(u16::MAX)
+        .max(24)
+        .min(area.width);
+    let height = u16::try_from(options.len().saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 3,
+        width,
+        height,
+    );
+    let inner = popup.inner(Margin::new(1, 1));
+    let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+    let viewport = usize::from(list.height);
+    if viewport > 0 {
+        if selected < *scroll {
+            *scroll = selected;
+        } else if selected >= scroll.saturating_add(viewport) {
+            *scroll = selected + 1 - viewport;
+        }
+    }
+
+    let lines = options
+        .iter()
+        .enumerate()
+        .skip(*scroll)
+        .take(viewport)
+        .map(|(index, name)| {
+            let style = if index == selected {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::styled(format!(" {name}"), style)
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::bordered().title(format!(" {title} ")).border_style(Style::default().dim()),
+        popup,
+    );
+    frame.render_widget(Paragraph::new(lines), list);
+    if inner.height > 0 {
+        let footer = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+        frame.render_widget(Paragraph::new(" ↑/↓ · ⏎ apply · esc".dim()), footer);
+    }
+    draw_scrollbar(frame, list, options.len(), viewport, *scroll);
+    popup
+}
+
+pub fn option_picker_index(
+    rect: Rect,
+    scroll: usize,
+    column: u16,
+    row: u16,
+    total: usize,
+) -> Option<usize> {
+    let inner = rect.inner(Margin::new(1, 1));
+    let list_height = inner.height.saturating_sub(1);
+    (column >= inner.x
+        && column < inner.x + inner.width
+        && row >= inner.y
+        && row < inner.y + list_height)
+        .then(|| scroll + usize::from(row - inner.y))
+        .filter(|index| *index < total)
 }
 
 /// True when a click at pane-local (column, row) lands on the `«` collapse
