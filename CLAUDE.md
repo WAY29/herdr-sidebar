@@ -209,10 +209,13 @@ Socket API (what the CLI wraps; usable directly from plugins, no subprocess need
 - Method names/params: `herdr api schema --json`, or `src/api/schema*` in the herdr source.
 
 Mouse in plugin TUIs: herdr forwards clicks/motion/wheel to a pane app that enables mouse
-capture — but **right-click is always intercepted** for herdr's pane context menu unless the
-click carries the modifier configured in `[ui] right_click_passthrough_modifier` (config.toml;
-e.g. `"ctrl"` → Ctrl+right-click reaches the app with ctrl stripped; a modifier is required,
-plain-right-click passthrough is not supported). Same-tab `pane.move` is a deliberate no-op
+capture — but in herdr 0.8.0 **right-click is always intercepted** for herdr's pane context menu
+unless the click carries the modifier configured in `[ui] right_click_passthrough_modifier`
+(config.toml; e.g. `"ctrl"` → Ctrl+right-click reaches the app with ctrl stripped). The installed
+0.8.0 socket schema has no `pane.input.set`; post-0.8 source added it in #2504, but do not depend
+on it until a release exposes the method. Sidebar file/folder rows instead reserve a fixed
+three-cell hover `⋯` button whose left click opens the plugin menu while plain right-click remains
+herdr's pane menu. Same-tab `pane.move` is a deliberate no-op
 (`SameTab`) — restructure within a tab by bouncing the pane through `--new-tab` and back
 (herdr auto-closes the emptied temp tab).
 
@@ -394,6 +397,8 @@ HACKING.md — budget time for that before promising a patched build.
   a plain List of the visible slice. When the scrollbar is present its last column is
   excluded from the list content width; right-edge actions render and hit-test against
   that SAME reduced width, otherwise long-list clicks land on the row body instead.
+  File/folder rows reserve their `⋯` menu cell even while hidden, so hover never shifts
+  the name or existing right-edge actions.
 - Gotcha: after the ✧ suggestion lands, panel focus moves to the message box — letter keys
   then type text instead of triggering actions (Esc returns to the list).
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
@@ -449,14 +454,16 @@ HACKING.md — budget time for that before promising a patched build.
   retain their previous behavior. Ctrl+right-click opens
   per-type menus (checkout / merge / cherry-pick / revert / reset / stash apply-pop-drop /
   fetch / delete / copy); destructive ones route through the generic `Overlay::ConfirmGit`
-  y/N prompt. Hovered file rows show a `+`/`−` glyph in their fixed action cell. Section
+  y/N prompt. Hovered current-change rows show a `⋯` menu cell followed by the existing
+  `+`/`−` cell and status letter; historical file leaves reserve `⋯` before their status.
+  Left-clicking `⋯` opens the same menu as a forwarded right click without moving either
+  existing tail cell. Section
   headers put the section-wide glyph immediately before the count badge; rendering and
   hit-testing share `section_action_start` because the badge moves with the count's digit
-  width, and the badge itself must NOT trigger stage/unstage. A dim "ctrl+rclick for menus"
-  hint sits on the « footer line whenever the footer is otherwise empty.
+  width, and the badge itself must NOT trigger stage/unstage.
 - **Diff statistics**: Changes and Staged each add one `git diff --numstat -z -M` query per
   existing status refresh; historical refs query name-status plus numstat once when opened.
-  File rows keep a fixed action/status tail; every file/directory hover shows an anchored tooltip
+  File rows keep a fixed menu/action/status tail; every file/directory hover shows an anchored tooltip
   with its full repo-relative path and green `+N` / red `-N` (directories aggregate descendants),
   omitting zero sides without shifting the row. `draw_list` re-hit-tests the saved mouse position
   every frame because a Git refresh rebuilds/clears row hover while a stationary pointer emits no

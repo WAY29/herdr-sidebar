@@ -56,8 +56,8 @@ A real tree, not a directory dump:
 - **Click a file and it opens** across every column beside the sidebar. Existing panes
   stay untouched behind the preview; Esc reveals them exactly as they were. Line numbers,
   scrolling, and binary files are handled, and clicking another file updates in place.
-- **Double-click folders** to fold, hover highlights, mouse wheel, and a
-  **Ctrl+right-click context menu**: New File, New Folder, Open with Default App (files
+- **Double-click folders** to fold, hover highlights, mouse wheel, and a hover **⋯ menu button**:
+  New File, New Folder, Open with Default App (files
   only — hands the file to the OS-associated app, like a double click in the file
   manager), Rename, Delete, Copy Path / Relative Path, Reveal in File Explorer.
 - Dotfiles toggle, live refresh, and a collapse-to-sliver mode when you want the columns back.
@@ -80,7 +80,8 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
   green/red `+N -N` line totals.
 - **Tree or list layout** — changed and historical files default to a compact folder tree,
   including deleted paths; switch the global SCM file view in ⚙ Settings when a flat list
-  is more useful. Folder rows fold, bulk-stage/unstage, and expose path-aware context menus.
+  is more useful. Folder rows fold and bulk-stage/unstage; hover `⋯` opens path-aware file
+  and folder menus without taking over herdr's normal pane right click.
 - Structured diffs hide long unchanged sections by default; toggle **Hide unmodified lines**
   in ⚙ Settings to show all retained context immediately and center the first change.
 - **✧ AI commit messages** — the sparkle button sends the pending diff to your local
@@ -166,7 +167,7 @@ CaskaydiaCove). Also recommended: the
 | `s` | settings | `s` | settings |
 | `1` / `2` | switch view | `1` / `2` | switch view |
 
-…and the mouse for all of it: click, double-click, scroll, hover, Ctrl+right-click menus.
+…and the mouse for all of it: click, double-click, scroll, hover, and `⋯` menus.
 
 ## Actions
 

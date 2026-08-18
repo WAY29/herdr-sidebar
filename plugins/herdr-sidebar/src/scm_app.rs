@@ -436,11 +436,16 @@ fn change_tree_chevron_hit_at(x: u16, row: Option<&ChangeTreeRow>, base_indent: 
 }
 
 fn change_tail_width(action_slot: bool) -> usize {
-    usize::from(action_slot) * 3 + 2
+    3 + usize::from(action_slot) * 3 + 2
 }
 
 fn change_action_hit(x: u16, width: u16) -> bool {
-    let start = width.saturating_sub(change_tail_width(true) as u16);
+    let start = width.saturating_sub(5);
+    x >= start && x < start.saturating_add(3)
+}
+
+fn change_menu_hit(x: u16, width: u16, action_slot: bool) -> bool {
+    let start = width.saturating_sub(change_tail_width(action_slot) as u16);
     x >= start && x < start.saturating_add(3)
 }
 
@@ -1464,6 +1469,10 @@ impl App {
                 Row::Staged(r, i) => {
                     self.focus = Focus::List;
                     self.select(index);
+                    if action_visible && change_menu_hit(row_x, row_width, true) {
+                        self.open_context_menu(x, y);
+                        return None;
+                    }
                     if let Some(path) = self.status_directory(r, i, true).map(str::to_string) {
                         if action_visible && change_action_hit(row_x, row_width) {
                             self.run_directory(r, path, true);
@@ -1486,6 +1495,10 @@ impl App {
                 Row::Unstaged(r, i) => {
                     self.focus = Focus::List;
                     self.select(index);
+                    if action_visible && change_menu_hit(row_x, row_width, true) {
+                        self.open_context_menu(x, y);
+                        return None;
+                    }
                     if let Some(path) = self.status_directory(r, i, false).map(str::to_string) {
                         if action_visible && change_action_hit(row_x, row_width) {
                             self.run_directory(r, path, false);
@@ -1585,6 +1598,16 @@ impl App {
                 Row::HistoryTree(i) => {
                     self.focus = Focus::List;
                     self.select(index);
+                    if action_visible
+                        && matches!(
+                            self.expanded_ref.as_ref().and_then(|expanded| expanded.rows.get(i)),
+                            Some(ChangeTreeRow::File { .. })
+                        )
+                        && change_menu_hit(row_x, row_width, false)
+                    {
+                        self.open_context_menu(x, y);
+                        return None;
+                    }
                     match self.expanded_ref.as_ref().and_then(|expanded| expanded.rows.get(i)) {
                         Some(ChangeTreeRow::Directory { .. }) => {
                             if change_tree_chevron_hit_at(
@@ -1607,7 +1630,7 @@ impl App {
         None
     }
 
-    /// Ctrl+right-click: the VS Code-style context menu.
+    /// Open the VS Code-style context menu for the row under the pointer.
     fn open_context_menu(&mut self, x: u16, y: u16) {
         let Some(index) = self.row_at(y) else { return };
         if self.rows[index] == Row::RepoSeparator {
@@ -3144,7 +3167,6 @@ impl App {
             self.zones.sync = Rect::default();
         }
         self.draw_list(frame, list);
-        let footer_empty = footer_lines.is_empty();
         frame.render_widget(Paragraph::new(footer_lines), footer);
         // Collapse button at the bottom-right of the last footer line,
         // mirroring the explorer (and herdr's own sidebar).
@@ -3154,15 +3176,6 @@ impl App {
             footer.width,
             1,
         );
-        if footer_empty {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    " ctrl+rclick for menus",
-                    Style::default().dim().italic(),
-                )),
-                last_line,
-            );
-        }
         let [_, footer_button] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(3)]).areas(last_line);
         frame.render_widget(
@@ -3546,7 +3559,10 @@ impl App {
                         },
                         width,
                         theme,
-                        ChangeTail::Status(row_hovered.then_some('−')),
+                        ChangeTail::Status {
+                            action: row_hovered.then_some('−'),
+                            menu: row_hovered,
+                        },
                         self.sidebar_state.scm_file_view == ScmFileView::Tree,
                         0,
                     ),
@@ -3560,7 +3576,10 @@ impl App {
                         },
                         width,
                         theme,
-                        ChangeTail::Status(row_hovered.then_some('+')),
+                        ChangeTail::Status {
+                            action: row_hovered.then_some('+'),
+                            menu: row_hovered,
+                        },
                         self.sidebar_state.scm_file_view == ScmFileView::Tree,
                         0,
                     ),
@@ -3581,7 +3600,13 @@ impl App {
                                 entry,
                                 width,
                                 theme,
-                                ChangeTail::History,
+                                ChangeTail::History {
+                                    menu: row_hovered
+                                        && matches!(
+                                            expanded.rows.get(i),
+                                            Some(ChangeTreeRow::File { .. })
+                                        ),
+                                },
                                 self.sidebar_state.scm_file_view == ScmFileView::Tree,
                                 4,
                             )
@@ -4014,8 +4039,8 @@ fn drawer_line(kind: Drawer, text: &str, expanded: Option<bool>) -> ListItem<'st
 
 #[derive(Clone, Copy)]
 enum ChangeTail {
-    Status(Option<char>),
-    History,
+    Status { action: Option<char>, menu: bool },
+    History { menu: bool },
 }
 
 struct ChangeTooltip {
@@ -4148,9 +4173,9 @@ fn change_tree_item(
     tree_mode: bool,
     base_indent: usize,
 ) -> ListItem<'static> {
-    let (action_slot, action) = match tail {
-        ChangeTail::Status(action) => (true, action),
-        ChangeTail::History => (false, None),
+    let (action_slot, action, menu) = match tail {
+        ChangeTail::Status { action, menu } => (true, action, menu),
+        ChangeTail::History { menu } => (false, None, menu),
     };
     let ChangeTreeRow::File { depth, .. } = row else {
         let ChangeTreeRow::Directory { name, depth, expanded, .. } = row else {
@@ -4165,13 +4190,13 @@ fn change_tree_item(
             " ".repeat(1 + base_indent + depth * 2),
             if *expanded { '▾' } else { '▸' }
         );
-        let action_width = if action_slot { 5 } else { 0 };
+        let tail_width = change_tail_width(action_slot);
         let icon_text = format!("{} ", dir_icon.glyph);
         let name_width = width
             .saturating_sub(
                 Span::raw(prefix.as_str()).width()
                     + Span::raw(icon_text.as_str()).width()
-                    + action_width,
+                    + tail_width,
             )
             .max(1);
         let mut spans = vec![
@@ -4180,14 +4205,19 @@ fn change_tree_item(
             Span::raw(truncate_to(name.clone(), name_width)),
         ];
         let used = spans.iter().map(Span::width).sum::<usize>();
-        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + action_width).max(1))));
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + tail_width).max(1))));
+        spans.push(if menu {
+            Span::styled(" ⋯ ", Style::default().bold())
+        } else {
+            Span::raw("   ")
+        });
         if action_slot {
             spans.push(match action {
                 Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
                 None => Span::raw("   "),
             });
-            spans.push(Span::raw("  "));
         }
+        spans.push(Span::raw("  "));
         return ListItem::new(Line::from(spans));
     };
     let Some(entry) = entry else { return ListItem::new("") };
@@ -4238,6 +4268,11 @@ fn change_tree_item(
     let letter = Span::styled(entry.letter.to_string(), Style::default().fg(color).bold());
     let pad = width.saturating_sub(left_width + tail_width);
     spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(if menu {
+        Span::styled(" ⋯ ", Style::default().bold())
+    } else {
+        Span::raw("   ")
+    });
     if action_slot {
         spans.push(match action {
             Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
@@ -4369,6 +4404,19 @@ mod tests {
     }
 
     #[test]
+    fn change_menu_precedes_the_existing_action_and_status_cells() {
+        assert!(!change_menu_hit(31, 40, true));
+        assert!(change_menu_hit(32, 40, true));
+        assert!(change_menu_hit(34, 40, true));
+        assert!(!change_menu_hit(35, 40, true));
+
+        assert!(!change_menu_hit(34, 40, false));
+        assert!(change_menu_hit(35, 40, false));
+        assert!(change_menu_hit(37, 40, false));
+        assert!(!change_menu_hit(38, 40, false));
+    }
+
+    #[test]
     fn section_action_hit_tracks_the_glyph_before_the_count_badge() {
         assert_eq!(section_action_start("Changes", 28, 73), 21);
         assert!(section_action_hit(20, "Changes", 28, 73));
@@ -4404,6 +4452,8 @@ mod tests {
         assert_eq!(list_content_width(0, 73, 20), 0);
 
         let content_width = list_content_width(30, 73, 20);
+        assert!(change_menu_hit(21, content_width, true));
+        assert!(change_menu_hit(23, content_width, true));
         assert!(change_action_hit(24, content_width));
         assert!(change_action_hit(26, content_width));
         assert!(!change_action_hit(27, content_width));

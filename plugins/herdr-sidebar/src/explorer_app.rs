@@ -90,7 +90,9 @@ impl PaneCtl {
 /// Where the tree body was drawn last frame, for mouse hit-testing.
 #[derive(Clone, Copy, Default)]
 struct BodyGeom {
+    left: u16,
     top: u16,
+    width: u16,
     height: u16,
     /// Scroll offset of the list at draw time.
     offset: usize,
@@ -524,10 +526,15 @@ impl App {
                     return None;
                 }
                 let index = self.row_at(mouse.row)?;
+                let row_x = mouse.column.saturating_sub(self.body.left);
+                if self.hovered == Some(index) && row_menu_hit(row_x, self.body.width) {
+                    self.open_context_menu(mouse.column, mouse.row);
+                    return None;
+                }
                 self.select(index);
                 let row = &self.rows[index];
                 let (is_dir, path) = (row.is_dir, row.path.clone());
-                let on_chevron = is_dir && hits_chevron(mouse.column, row.depth);
+                let on_chevron = is_dir && hits_chevron(row_x, row.depth, self.body.width);
                 // Double click = second click on the same row inside the window.
                 let now = std::time::Instant::now();
                 let double = self
@@ -1396,19 +1403,30 @@ impl App {
             let theme = self.theme;
             let hovered = self.hovered;
             let selected = self.selected;
+            let content_width = list_content_width(body.width, self.rows.len(), h);
             let items: Vec<ListItem> = self
                 .rows
                 .iter()
                 .enumerate()
                 .skip(self.scroll)
                 .take(h)
-                .map(|(i, r)| row_item(r, theme, hovered == Some(i), selected == Some(i)))
+                .map(|(i, r)| {
+                    row_item(
+                        r,
+                        theme,
+                        hovered == Some(i),
+                        selected == Some(i),
+                        content_width as usize,
+                    )
+                })
                 .collect();
             frame.render_widget(List::new(items), body);
             draw_scrollbar(frame, body, self.rows.len(), h, self.scroll);
         }
         self.body = BodyGeom {
+            left: body.x,
             top: body.y,
+            width: list_content_width(body.width, self.rows.len(), (body.height as usize).max(1)),
             height: body.height,
             offset: self.scroll,
         };
@@ -1465,22 +1483,7 @@ impl App {
                 _ => Vec::new(),
             }
         };
-        let footer_empty = footer_lines.is_empty();
         frame.render_widget(Paragraph::new(footer_lines), footer);
-        if footer_empty {
-            let hint_area = Rect::new(
-                last_line.x,
-                last_line.y,
-                last_line.width.saturating_sub(3),
-                1,
-            );
-            frame.render_widget(
-                Paragraph::new(
-                    " ctrl+rclick for menus".dim().italic(),
-                ),
-                hint_area,
-            );
-        }
 
         match self.overlay {
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
@@ -1719,8 +1722,17 @@ impl App {
 
 }
 
-fn row_item(row: &Row, theme: IconTheme, hovered: bool, selected: bool) -> ListItem<'static> {
-    let indent = "  ".repeat(row.depth);
+fn row_item(
+    row: &Row,
+    theme: IconTheme,
+    hovered: bool,
+    selected: bool,
+    width: usize,
+) -> ListItem<'static> {
+    const MENU_WIDTH: usize = 3;
+    let left_limit = width.saturating_sub(MENU_WIDTH);
+    let indent_width = row_indent_width(row.depth, width);
+    let indent = " ".repeat(indent_width);
     let arrow = if row.is_dir {
         if row.expanded { "▾ " } else { "▸ " }
     } else {
@@ -1734,11 +1746,22 @@ fn row_item(row: &Row, theme: IconTheme, hovered: bool, selected: bool) -> ListI
     // Folder and file names share the default foreground, like VS Code — the
     // chevron and icon carry the distinction. Accent-on-gray (the old blue
     // names) was hard to read against the selection/hover backgrounds.
-    let item = ListItem::new(Line::from(vec![
+    let icon_text = format!("{} ", icon.glyph);
+    let fixed_width = indent_width + Span::raw(arrow).width() + Span::raw(&icon_text).width();
+    let name = truncate_to(row.name.clone(), left_limit.saturating_sub(fixed_width));
+    let mut spans = vec![
         Span::styled(format!("{indent}{arrow}"), Style::default().dim()),
-        Span::styled(format!("{} ", icon.glyph), icon_style),
-        Span::raw(row.name.clone()),
-    ]));
+        Span::styled(icon_text, icon_style),
+        Span::raw(name),
+    ];
+    let used = spans.iter().map(Span::width).sum::<usize>();
+    spans.push(Span::raw(" ".repeat(left_limit.saturating_sub(used))));
+    spans.push(if hovered {
+        Span::styled(" ⋯ ", Style::default().bold())
+    } else {
+        Span::raw("   ")
+    });
+    let item = ListItem::new(Line::from(spans));
     if selected {
         item.style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     } else if hovered {
@@ -1777,9 +1800,21 @@ fn create_target_dir(selected: Option<&Row>, root: PathBuf) -> PathBuf {
 
 /// True when a click at pane-local `column` lands on a row's disclosure
 /// chevron (the two cells right after the depth indent).
-fn hits_chevron(column: u16, depth: usize) -> bool {
-    let start = (depth * 2) as u16;
+fn row_indent_width(depth: usize, width: usize) -> usize {
+    (depth * 2).min(width.saturating_sub(7))
+}
+
+fn hits_chevron(column: u16, depth: usize, width: u16) -> bool {
+    let start = row_indent_width(depth, width as usize) as u16;
     (start..start + 2).contains(&column)
+}
+
+fn row_menu_hit(column: u16, width: u16) -> bool {
+    column >= width.saturating_sub(3) && column < width
+}
+
+fn list_content_width(width: u16, total: usize, visible: usize) -> u16 {
+    width.saturating_sub(u16::from(total > visible))
 }
 
 /// The row index at a pane-local mouse row given the last-drawn body
@@ -1822,12 +1857,13 @@ mod tests {
 
     #[test]
     fn chevron_hit_region_follows_indent_depth() {
-        assert!(hits_chevron(0, 0));
-        assert!(hits_chevron(1, 0));
-        assert!(!hits_chevron(2, 0), "icon cell");
-        assert!(hits_chevron(2, 1));
-        assert!(hits_chevron(3, 1));
-        assert!(!hits_chevron(0, 1), "indent cell");
+        assert!(hits_chevron(0, 0, 20));
+        assert!(hits_chevron(1, 0, 20));
+        assert!(!hits_chevron(2, 0, 20), "icon cell");
+        assert!(hits_chevron(2, 1, 20));
+        assert!(hits_chevron(3, 1, 20));
+        assert!(!hits_chevron(0, 1, 20), "indent cell");
+        assert!(hits_chevron(13, 99, 20), "deep rows use the visible indent");
     }
 
     #[test]
@@ -1854,12 +1890,21 @@ mod tests {
 
     #[test]
     fn row_index_accounts_for_header_and_scroll() {
-        let body = BodyGeom { top: 1, height: 10, offset: 5 };
+        let body = BodyGeom { left: 0, top: 1, width: 20, height: 10, offset: 5 };
         assert_eq!(row_index_at(body, 100, 0), None, "header row");
         assert_eq!(row_index_at(body, 100, 1), Some(5));
         assert_eq!(row_index_at(body, 100, 10), Some(14));
         assert_eq!(row_index_at(body, 100, 11), None, "footer row");
         assert_eq!(row_index_at(body, 6, 2), None, "past the last row");
+    }
+
+    #[test]
+    fn row_menu_uses_the_last_three_content_columns() {
+        assert!(!row_menu_hit(16, 20));
+        assert!(row_menu_hit(17, 20));
+        assert!(row_menu_hit(19, 20));
+        assert!(!row_menu_hit(20, 20));
+        assert_eq!(list_content_width(20, 21, 20), 19);
     }
 
 }
