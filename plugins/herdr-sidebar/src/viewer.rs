@@ -6,6 +6,7 @@
 //! The tail of this module is the client side — the request handoff shared by
 //! both sidebar views.
 
+use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -145,12 +146,20 @@ struct Doc {
     /// File previews get a line-number gutter; diffs carry their own gutter.
     numbered: bool,
     scroll: usize,
+    /// Expandable fold owned by each rendered row; empty for non-diff docs.
+    folds: Vec<Option<crate::diffview::FoldId>>,
 }
 
-fn load(request: &Request, diff_theme: DiffTheme) -> Doc {
+fn load(
+    request: &Request,
+    diff_theme: DiffTheme,
+    expanded_folds: &HashSet<crate::diffview::FoldId>,
+) -> Doc {
     match request {
         Request::File(path) => load_file(path, diff_theme),
-        Request::Diff { root, rel, kind } => load_diff(root, rel, kind, diff_theme),
+        Request::Diff { root, rel, kind } => {
+            load_diff(root, rel, kind, diff_theme, expanded_folds)
+        }
         Request::Show { root, spec, path } => load_show(root, spec, path.as_deref()),
     }
 }
@@ -195,6 +204,7 @@ fn load_show(root: &Path, spec: &str, path: Option<&str>) -> Doc {
         lines,
         numbered: false,
         scroll: 0,
+        folds: Vec::new(),
     }
 }
 
@@ -288,14 +298,27 @@ fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
         lines,
         numbered,
         scroll: 0,
+        folds: Vec::new(),
     }
 }
 
-fn load_diff(root: &Path, rel: &str, kind: &str, diff_theme: DiffTheme) -> Doc {
+fn load_diff(
+    root: &Path,
+    rel: &str,
+    kind: &str,
+    diff_theme: DiffTheme,
+    expanded_folds: &HashSet<crate::diffview::FoldId>,
+) -> Doc {
     let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
     // Plain (uncolored) diff: crate::diffview parses it and renders the
     // editor look — line gutter, tinted rows, syntax-highlighted code.
-    let mut args: Vec<String> = vec!["diff".into(), "--no-ext-diff".into()];
+    // ponytail: 5k context lines match the viewer's own display ceiling;
+    // larger gaps stay summarized instead of making git output unbounded.
+    let mut args: Vec<String> = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        format!("--unified={MAX_LINES}"),
+    ];
     match kind {
         "staged" => args.push("--cached".into()),
         // An untracked file has no diff; --no-index against the null device
@@ -313,20 +336,28 @@ fn load_diff(root: &Path, rel: &str, kind: &str, diff_theme: DiffTheme) -> Doc {
         .args(&args)
         .current_dir(root)
         .output();
-    let lines = match output {
-        Err(e) => vec![Line::raw(format!("(git failed: {e})"))],
+    let (lines, folds) = match output {
+        Err(e) => (vec![Line::raw(format!("(git failed: {e})"))], Vec::new()),
         Ok(out) => {
             // --no-index exits 1 when the files differ; that's not an error.
             let text = String::from_utf8_lossy(&out.stdout);
             if text.trim().is_empty() {
                 let err = String::from_utf8_lossy(&out.stderr);
                 if err.trim().is_empty() {
-                    vec![Line::raw("(no changes)")]
+                    (vec![Line::raw("(no changes)")], Vec::new())
                 } else {
-                    vec![Line::raw(format!("({})", err.trim()))]
+                    (vec![Line::raw(format!("({})", err.trim()))], Vec::new())
                 }
             } else {
-                crate::diffview::render(rel, &text, diff_theme)
+                let mut rendered =
+                    crate::diffview::render_expanded(rel, &text, diff_theme, expanded_folds);
+                if rendered.lines.len() > MAX_LINES {
+                    rendered.lines.truncate(MAX_LINES);
+                    rendered.folds.truncate(MAX_LINES);
+                    rendered.lines.push(Line::raw("… (truncated)"));
+                    rendered.folds.push(None);
+                }
+                (rendered.lines, rendered.folds)
             }
         }
     };
@@ -341,6 +372,7 @@ fn load_diff(root: &Path, rel: &str, kind: &str, diff_theme: DiffTheme) -> Doc {
         lines,
         numbered: false,
         scroll: 0,
+        folds,
     }
 }
 
@@ -421,8 +453,10 @@ pub struct InlinePreview {
     doc: Option<Doc>,
     theme: IconTheme,
     diff_theme: DiffTheme,
+    expanded_folds: HashSet<crate::diffview::FoldId>,
     sidebar_width: u16,
     area: Rect,
+    body: Rect,
     last_refresh: Instant,
 }
 
@@ -451,8 +485,10 @@ impl InlinePreview {
                 state.icons,
             ),
             diff_theme: state.diff_theme,
+            expanded_folds: HashSet::new(),
             sidebar_width: 30,
             area: Rect::default(),
+            body: Rect::default(),
             last_refresh: Instant::now(),
         }
     }
@@ -468,6 +504,7 @@ impl InlinePreview {
             if self.current.is_some() {
                 self.current = None;
                 self.doc = None;
+                self.expanded_folds.clear();
             }
             return;
         };
@@ -476,7 +513,8 @@ impl InlinePreview {
         }
         self.sidebar_width = width.max(1);
         self.diff_theme = crate::state::load_state().diff_theme;
-        self.doc = Some(load(&request, self.diff_theme));
+        self.expanded_folds.clear();
+        self.doc = Some(load(&request, self.diff_theme, &self.expanded_folds));
         self.current = Some(request);
         self.last_refresh = Instant::now();
     }
@@ -508,7 +546,8 @@ impl InlinePreview {
         let border = Block::default().borders(Borders::LEFT).border_style(Style::default().dim());
         let inner = border.inner(area);
         frame.render_widget(border, area);
-        draw_doc(frame, doc, self.theme, inner);
+        let (_, body) = draw_doc(frame, doc, self.theme, inner);
+        self.body = body;
     }
 
     pub fn owns_mouse(&self, mouse: &MouseEvent) -> bool {
@@ -548,6 +587,21 @@ impl InlinePreview {
             self.close();
             return;
         }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(row) =
+                doc_row_at(self.body, self.doc.as_ref().map_or(0, |doc| doc.scroll), &mouse)
+            && let Some(fold) = self
+                .doc
+                .as_ref()
+                .and_then(|doc| doc.folds.get(row))
+                .copied()
+                .flatten()
+        {
+            if self.expanded_folds.insert(fold) {
+                self.reload_current();
+            }
+            return;
+        }
         let Some(doc) = self.doc.as_mut() else { return };
         let max = doc.lines.len().saturating_sub(1);
         match mouse.kind {
@@ -571,7 +625,7 @@ impl InlinePreview {
             return;
         };
         let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
-        let mut doc = load(request, self.diff_theme);
+        let mut doc = load(request, self.diff_theme, &self.expanded_folds);
         doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
         self.doc = Some(doc);
     }
@@ -579,7 +633,7 @@ impl InlinePreview {
     fn reload_current(&mut self) {
         let Some(request) = self.current.as_ref() else { return };
         let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
-        let mut doc = load(request, self.diff_theme);
+        let mut doc = load(request, self.diff_theme, &self.expanded_folds);
         doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
         self.doc = Some(doc);
         self.last_refresh = Instant::now();
@@ -594,6 +648,7 @@ impl InlinePreview {
         }
         self.current = None;
         self.doc = None;
+        self.expanded_folds.clear();
         if let Some(owner) = &self.owner {
             let _ = ipc::call_text(
                 "pane.zoom",
@@ -621,15 +676,17 @@ pub fn run(control: &Path) -> std::io::Result<()> {
     );
     let mut diff_theme = state.diff_theme;
     let mut current = read_control(control);
+    let mut expanded_folds = HashSet::new();
     let mut doc = current
         .as_ref()
-        .map(|request| load(request, diff_theme))
+        .map(|request| load(request, diff_theme, &expanded_folds))
         .unwrap_or_else(|| Doc {
         name: "(nothing to show)".into(),
         context: String::new(),
         lines: vec![Line::raw("(waiting for a click in the sidebar)")],
         numbered: false,
         scroll: 0,
+        folds: Vec::new(),
     });
     report_identity(&doc.name);
 
@@ -644,11 +701,12 @@ pub fn run(control: &Path) -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
     let mut page: usize = 20;
+    let mut body = Rect::default();
     let mut beat: u64 = 0;
     let result = loop {
         let draw = terminal.draw(|frame| {
             let area = frame.area();
-            page = draw_doc(frame, &mut doc, theme, area);
+            (page, body) = draw_doc(frame, &mut doc, theme, area);
         });
         if let Err(e) = draw {
             break Err(e);
@@ -676,6 +734,17 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                         close_own_pane(control);
                         break Ok(());
                     }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(row) = doc_row_at(body, doc.scroll, &mouse)
+                            && let Some(fold) = doc.folds.get(row).copied().flatten()
+                            && expanded_folds.insert(fold)
+                            && let Some(request) = &current
+                        {
+                            let keep = doc.scroll;
+                            doc = load(request, diff_theme, &expanded_folds);
+                            doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
+                        }
+                    }
                     _ => {}
                 },
                 _ => {} // resize etc: redraw
@@ -689,9 +758,10 @@ pub fn run(control: &Path) -> std::io::Result<()> {
             let target = read_control(control);
             if target != current {
                 current = target;
+                expanded_folds.clear();
                 if let Some(request) = &current {
                     diff_theme = crate::state::load_state().diff_theme;
-                    doc = load(request, diff_theme);
+                    doc = load(request, diff_theme, &expanded_folds);
                     report_identity(&doc.name);
                 }
             } else if beat.is_multiple_of(8)
@@ -699,7 +769,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
             {
                 let keep = doc.scroll;
                 diff_theme = crate::state::load_state().diff_theme;
-                doc = load(request, diff_theme);
+                doc = load(request, diff_theme, &expanded_folds);
                 doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
             }
         }
@@ -709,9 +779,17 @@ pub fn run(control: &Path) -> std::io::Result<()> {
     result
 }
 
+fn doc_row_at(body: Rect, scroll: usize, mouse: &MouseEvent) -> Option<usize> {
+    (mouse.column >= body.x
+        && mouse.column < body.x.saturating_add(body.width)
+        && mouse.row >= body.y
+        && mouse.row < body.y.saturating_add(body.height))
+        .then(|| scroll + usize::from(mouse.row - body.y))
+}
+
 /// Header (✕ close + name + context), body, hint footer. Returns the page
-/// stride for PageUp/Down.
-fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> usize {
+/// stride for PageUp/Down and the body hit-test rectangle.
+fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> (usize, Rect) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -781,7 +859,7 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> u
         Paragraph::new(Line::from(" ↑↓ scroll  ⇞⇟ page  g G ends  q close".dim())),
         footer,
     );
-    usize::from(body.height).saturating_sub(1).max(1)
+    (usize::from(body.height).saturating_sub(1).max(1), body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,6 +1215,18 @@ mod tests {
             parse_request(payload),
             Some(Request::File(PathBuf::from("/tmp/main.rs")))
         );
+    }
+
+    #[test]
+    fn diff_body_click_maps_to_the_scrolled_document_row() {
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(doc_row_at(Rect::new(10, 5, 20, 4), 10, &mouse), Some(12));
+        assert_eq!(doc_row_at(Rect::new(10, 8, 20, 4), 10, &mouse), None);
     }
 
     #[test]

@@ -460,9 +460,12 @@ HACKING.md — budget time for that before promising a patched build.
   `git diff` (one line-number gutter plus a red/green change bar, full-width Catppuccin
   row tints padded at draw time, stronger word-level tint on paired changed lines,
   syntax-highlighted code through two
-  stateful `LineHighlighter`s for old/new contexts). `ansi.rs` (SGR parser) still renders
-  `git show` output (ansi-to-tui pins an older ratatui — don't add it), and diffs re-run
-  every ~2s so they live-update.
+  stateful `LineHighlighter`s for old/new contexts). Git receives `--unified=5000`, matching
+  the Viewer's own line ceiling; `diffview` then retains those Context events behind clickable
+  `⋯ N unmodified lines` rows. Clicking expands only that anchored old/new line range, and the
+  expanded set survives theme changes plus the ~2s live refresh. Gaps beyond the 5000-line
+  context budget remain summarized. `ansi.rs` (SGR parser) still renders `git show` output
+  (ansi-to-tui pins an older ratatui — don't add it).
   Staged rows show `--cached`; untracked files render via `diff --no-index NUL <file>`.
 
 ### Syntax highlighting (file preview)

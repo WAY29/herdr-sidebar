@@ -2,7 +2,7 @@
 //! bars, syntax-highlighted code over row tints, and a darker word-level tint
 //! on changed segments. Input is plain `git diff` output (no ANSI).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -25,7 +25,7 @@ const FOLD_FG: Color = Color::Rgb(0xa6, 0xad, 0xc8);
 #[derive(Debug, PartialEq, Eq)]
 enum Ev {
     /// Unchanged lines omitted before the next hunk.
-    Fold(usize),
+    Omitted(usize),
     /// Unchanged: (old line no, new line no, text).
     Ctx(usize, usize, String),
     Del(usize, String),
@@ -33,6 +33,28 @@ enum Ev {
     /// Anything unparsed worth keeping ("Binary files … differ").
     Plain(String),
 }
+
+/// Stable identity for an expandable context fold across live refreshes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FoldId {
+    old_no: usize,
+    new_no: usize,
+}
+
+/// Rendered rows plus the fold (if any) owned by each row.
+pub struct RenderedDiff {
+    pub lines: Vec<Line<'static>>,
+    pub folds: Vec<Option<FoldId>>,
+}
+
+#[derive(Clone, Copy)]
+struct FoldRange {
+    start: usize,
+    end: usize,
+    id: FoldId,
+}
+
+const FOLD_MARGIN: usize = 3;
 
 fn parse_events(diff: &str) -> Vec<Ev> {
     let mut evs = Vec::new();
@@ -92,7 +114,7 @@ fn parse_events(diff: &str) -> Vec<Ev> {
             };
             let hidden = hidden_old.min(hidden_new);
             if hidden > 0 {
-                evs.push(Ev::Fold(hidden));
+                evs.push(Ev::Omitted(hidden));
             }
             old_no = next_old;
             new_no = next_new;
@@ -119,6 +141,44 @@ fn parse_events(diff: &str) -> Vec<Ev> {
         }
     }
     evs
+}
+
+/// Collapse long runs of context while retaining their parsed rows for expansion.
+fn fold_ranges(evs: &[Ev]) -> Vec<FoldRange> {
+    let mut keep = vec![false; evs.len()];
+    for (i, ev) in evs.iter().enumerate() {
+        if matches!(ev, Ev::Ctx(..)) {
+            continue;
+        }
+        let lo = i.saturating_sub(FOLD_MARGIN);
+        let hi = (i + FOLD_MARGIN).min(evs.len().saturating_sub(1));
+        if lo <= hi {
+            keep[lo..=hi].fill(true);
+        }
+    }
+
+    let mut folds = Vec::new();
+    let mut i = 0;
+    while i < evs.len() {
+        if keep[i] || !matches!(&evs[i], Ev::Ctx(..)) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < evs.len() && !keep[i] && matches!(&evs[i], Ev::Ctx(..)) {
+            i += 1;
+        }
+        if i - start > 1
+            && let Ev::Ctx(old_no, new_no, _) = &evs[start]
+        {
+            folds.push(FoldRange {
+                start,
+                end: i,
+                id: FoldId { old_no: *old_no, new_no: *new_no },
+            });
+        }
+    }
+    folds
 }
 
 /// Char range (start, end) of the differing middle of a changed line,
@@ -210,8 +270,19 @@ fn overlay_bg(spans: Vec<Span<'static>>, range: (usize, usize), bg: Color) -> Ve
 /// Render a unified diff for `rel` (its extension picks the grammar) into
 /// display lines: line number + change bar, tinted rows, highlighted code.
 pub fn render(rel: &str, diff: &str, diff_theme: DiffTheme) -> Vec<Line<'static>> {
+    render_expanded(rel, diff, diff_theme, &HashSet::new()).lines
+}
+
+/// Render a diff while replacing selected context folds with their retained rows.
+pub fn render_expanded(
+    rel: &str,
+    diff: &str,
+    diff_theme: DiffTheme,
+    expanded: &HashSet<FoldId>,
+) -> RenderedDiff {
     let evs = parse_events(diff);
     let ranges = word_ranges(&evs);
+    let fold_ranges = fold_ranges(&evs);
 
     let max_no = evs
         .iter()
@@ -242,9 +313,42 @@ pub fn render(rel: &str, diff: &str, diff_theme: DiffTheme) -> Vec<Line<'static>
     };
 
     let mut lines = Vec::new();
-    for (idx, ev) in evs.iter().enumerate() {
-        match ev {
-            Ev::Fold(hidden) => lines.push(
+    let mut folds = Vec::new();
+    let mut pending_folds = fold_ranges.iter().peekable();
+    let mut idx = 0;
+    while idx < evs.len() {
+        if let Some(fold) = pending_folds.peek().map(|fold| **fold)
+            && fold.start == idx
+        {
+            pending_folds.next();
+            if !expanded.contains(&fold.id) {
+                // Hidden context still advances both syntax states, so code after
+                // the marker highlights exactly as if every line were visible.
+                for ev in &evs[fold.start..fold.end] {
+                    if let Ev::Ctx(_, _, text) = ev {
+                        old_hl.line(text);
+                        new_hl.line(text);
+                    }
+                }
+                lines.push(
+                    Line::from(Span::styled(
+                        format!(
+                            "{}⋯  {} unmodified lines",
+                            " ".repeat(w + 2),
+                            fold.end - fold.start
+                        ),
+                        Style::default().fg(FOLD_FG),
+                    ))
+                    .style(Style::default().bg(FOLD_BG)),
+                );
+                folds.push(Some(fold.id));
+                idx = fold.end;
+                continue;
+            }
+        }
+
+        match &evs[idx] {
+            Ev::Omitted(hidden) => lines.push(
                 Line::from(Span::styled(
                     format!("{}⋯  {hidden} unmodified lines", " ".repeat(w + 2)),
                     Style::default().fg(FOLD_FG),
@@ -281,8 +385,10 @@ pub fn render(rel: &str, diff: &str, diff_theme: DiffTheme) -> Vec<Line<'static>
                 lines.push(Line::from(all).style(Style::default().bg(ADD_BG)));
             }
         }
+        folds.push(None);
+        idx += 1;
     }
-    lines
+    RenderedDiff { lines, folds }
 }
 
 #[cfg(test)]
@@ -376,5 +482,38 @@ mod tests {
             DEFAULT_DIFF_THEME,
         );
         assert_eq!(lines[0].to_string(), "    ⋯  9 unmodified lines");
+    }
+
+    #[test]
+    fn retained_context_fold_expands_by_its_anchor() {
+        use std::fmt::Write as _;
+
+        let mut diff = String::from("@@ -1,20 +1,20 @@\n");
+        for n in 1..=20 {
+            if n == 10 {
+                diff.push_str("-line 10\n+LINE 10\n");
+            } else {
+                writeln!(diff, " line {n}").unwrap();
+            }
+        }
+
+        let collapsed = render_expanded("x.txt", &diff, DEFAULT_DIFF_THEME, &HashSet::new());
+        assert_eq!(collapsed.lines.len(), collapsed.folds.len());
+        let (row, fold) = collapsed
+            .folds
+            .iter()
+            .enumerate()
+            .find_map(|(row, fold)| fold.map(|fold| (row, fold)))
+            .expect("long leading context should fold");
+        assert!(collapsed.lines[row].to_string().contains("6 unmodified lines"));
+
+        let expanded = render_expanded(
+            "x.txt",
+            &diff,
+            DEFAULT_DIFF_THEME,
+            &HashSet::from([fold]),
+        );
+        assert_eq!(expanded.lines.len(), collapsed.lines.len() + 5);
+        assert!(expanded.lines.iter().any(|line| line.to_string().contains("line 1")));
     }
 }
