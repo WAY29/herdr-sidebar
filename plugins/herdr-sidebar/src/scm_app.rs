@@ -411,6 +411,15 @@ fn same_row(left: Row, right: Row) -> bool {
     left == right
 }
 
+fn status_header_index(rows: &[Row], repo: usize, staged: bool) -> Option<usize> {
+    rows.iter().position(|row| {
+        matches!(
+            (staged, row),
+            (true, Row::StagedHeader(r)) | (false, Row::ChangesHeader(r)) if *r == repo
+        )
+    })
+}
+
 fn change_tree_chevron_hit(x: u16, row: Option<&ChangeTreeRow>) -> bool {
     change_tree_chevron_hit_at(x, row, 0)
 }
@@ -431,6 +440,41 @@ fn change_tail_width(action_slot: bool) -> usize {
 fn change_action_hit(x: u16, width: u16) -> bool {
     let start = width.saturating_sub(change_tail_width(true) as u16);
     x >= start && x < start.saturating_add(3)
+}
+
+fn section_action_start(title: &str, width: usize, count: usize) -> usize {
+    let left_width = title.len() + 3;
+    let badge_width = count.to_string().len() + 2;
+    width
+        .saturating_sub(badge_width + 3)
+        .max(left_width + 1)
+}
+
+fn section_action_hit(x: u16, title: &str, width: u16, count: usize) -> bool {
+    let glyph = section_action_start(title, width as usize, count) as u16;
+    x >= glyph.saturating_sub(1) && x < glyph.saturating_add(2)
+}
+
+fn list_content_width(width: u16, total: usize, visible: usize) -> u16 {
+    if width == 0 {
+        0
+    } else {
+        width.saturating_sub(u16::from(total > visible)).max(1)
+    }
+}
+
+fn directory_pathspecs(path: &str, entries: &[FileEntry]) -> Vec<String> {
+    let mut paths = vec![path.to_string()];
+    for entry in entries.iter().filter(|entry| {
+        entry.path.strip_prefix(path).is_some_and(|rest| rest.starts_with('/'))
+    }) {
+        let Some(orig) = entry.orig.as_ref() else { continue };
+        let inside = orig.strip_prefix(path).is_some_and(|rest| rest.starts_with('/'));
+        if !inside && !paths.contains(orig) {
+            paths.push(orig.clone());
+        }
+    }
+    paths
 }
 
 fn toggle_collapsed_path(collapsed: &mut BTreeSet<String>, path: &str, was_expanded: bool) {
@@ -487,7 +531,6 @@ enum MenuTarget {
         repo: usize,
         path: String,
         staged: bool,
-        entries: Vec<FileEntry>,
     },
     HistoryFile {
         repo: usize,
@@ -579,8 +622,10 @@ type SettingRow = (Setting, &'static str, String, bool);
 /// Where the list body was drawn last frame, for mouse hit-testing.
 #[derive(Clone, Copy, Default)]
 struct BodyGeom {
+    left: u16,
     top: u16,
     height: u16,
+    width: u16,
     offset: usize,
 }
 
@@ -855,16 +900,6 @@ impl App {
                 }
             }
         }
-    }
-
-    fn entries_in_directory(&self, repo: usize, path: &str, staged: bool) -> Vec<FileEntry> {
-        let Some(repo) = self.repos.get(repo) else { return Vec::new() };
-        let entries = if staged { &repo.status.staged } else { &repo.status.unstaged };
-        entries
-            .iter()
-            .filter(|entry| entry.path.strip_prefix(path).is_some_and(|rest| rest.starts_with('/')))
-            .cloned()
-            .collect()
     }
 
     /// More than one repo: VS Code-style per-repo inline inputs in the list.
@@ -1327,7 +1362,10 @@ impl App {
             }
             MouseEventKind::ScrollUp => self.scroll_view(-3),
             MouseEventKind::ScrollDown => self.scroll_view(3),
-            MouseEventKind::Down(MouseButton::Left) => return self.left_click(mouse),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.hovered = self.row_at(mouse.row);
+                return self.left_click(mouse);
+            }
             MouseEventKind::Down(MouseButton::Right) => {
                 // Reaches us only as Ctrl+right-click (herdr's passthrough
                 // modifier); plain right-click opens herdr's own pane menu.
@@ -1395,6 +1433,8 @@ impl App {
         }
         if let Some((index, line)) = self.row_hit(y) {
             let _ = line;
+            let row_x = x.saturating_sub(self.body.left);
+            let row_width = self.body.width;
             let now = std::time::Instant::now();
             let double = self
                 .last_click
@@ -1409,16 +1449,15 @@ impl App {
                     self.focus = Focus::List;
                     self.select(index);
                     if let Some(path) = self.status_directory(r, i, true).map(str::to_string) {
-                        if action_visible && change_action_hit(x, self.last_width) {
-                            let entries = self.entries_in_directory(r, &path, true);
-                            self.run_entries(r, entries, true);
-                        } else if change_tree_chevron_hit(x, self.status_tree_row(r, i, true))
+                        if action_visible && change_action_hit(row_x, row_width) {
+                            self.run_directory(r, path, true);
+                        } else if change_tree_chevron_hit(row_x, self.status_tree_row(r, i, true))
                             || double
                         {
                             self.toggle_status_directory(r, i, true);
                         }
                     } else if let Some(entry) = self.status_entry(r, i, true).cloned() {
-                        if action_visible && change_action_hit(x, self.last_width) {
+                        if action_visible && change_action_hit(row_x, row_width) {
                             if let Err(e) = self.repos[r].git.unstage(&entry) {
                                 self.flash = Some((e, true));
                             }
@@ -1432,16 +1471,15 @@ impl App {
                     self.focus = Focus::List;
                     self.select(index);
                     if let Some(path) = self.status_directory(r, i, false).map(str::to_string) {
-                        if action_visible && change_action_hit(x, self.last_width) {
-                            let entries = self.entries_in_directory(r, &path, false);
-                            self.run_entries(r, entries, false);
-                        } else if change_tree_chevron_hit(x, self.status_tree_row(r, i, false))
+                        if action_visible && change_action_hit(row_x, row_width) {
+                            self.run_directory(r, path, false);
+                        } else if change_tree_chevron_hit(row_x, self.status_tree_row(r, i, false))
                             || double
                         {
                             self.toggle_status_directory(r, i, false);
                         }
                     } else if let Some(entry) = self.status_entry(r, i, false).cloned() {
-                        if action_visible && change_action_hit(x, self.last_width) {
+                        if action_visible && change_action_hit(row_x, row_width) {
                             if let Err(e) = self.repos[r].git.stage(&entry) {
                                 self.flash = Some((e, true));
                             }
@@ -1456,7 +1494,7 @@ impl App {
                     self.set_active_repo(r);
                     self.rebuild();
                     // The box's middle line holds the input and the ✧ button.
-                    if line == 1 && x >= self.last_width.saturating_sub(4) {
+                    if line == 1 && row_x >= row_width.saturating_sub(4) {
                         self.suggest_message();
                     } else {
                         self.focus = Focus::Message;
@@ -1474,10 +1512,10 @@ impl App {
                     self.select(index);
                     // Right-side action icons: ⟳ sync · ✓ commit (fixed
                     // offsets from the right edge, see repo_header_item).
-                    let w = self.last_width;
-                    if x >= w.saturating_sub(3) && x < w {
+                    let w = row_width;
+                    if row_x >= w.saturating_sub(3) && row_x < w {
                         self.commit_repo(r);
-                    } else if x >= w.saturating_sub(6) && x < w.saturating_sub(3) {
+                    } else if row_x >= w.saturating_sub(6) && row_x < w.saturating_sub(3) {
                         self.sync_repo(r);
                     } else {
                         self.activate();
@@ -1487,14 +1525,17 @@ impl App {
                 Row::StagedHeader(r) => {
                     self.focus = Focus::List;
                     self.select(index);
-                    if action_visible && x >= self.last_width.saturating_sub(6) {
+                    let count = self.repos[r].status.staged.len();
+                    if action_visible
+                        && section_action_hit(row_x, "Staged Changes", row_width, count)
+                    {
                         if let Some(repo) = self.repos.get(r)
                             && let Err(e) = repo.git.unstage_all()
                         {
                             self.flash = Some((e, true));
                         }
                         self.refresh();
-                        self.select_nearest_status_row(r, true, "");
+                        self.select_status_header(r, false);
                     } else {
                         self.activate();
                     }
@@ -1502,14 +1543,15 @@ impl App {
                 Row::ChangesHeader(r) => {
                     self.focus = Focus::List;
                     self.select(index);
-                    if action_visible && x >= self.last_width.saturating_sub(6) {
+                    let count = self.repos[r].status.unstaged.len();
+                    if action_visible && section_action_hit(row_x, "Changes", row_width, count) {
                         if let Some(repo) = self.repos.get(r)
                             && let Err(e) = repo.git.stage_all()
                         {
                             self.flash = Some((e, true));
                         }
                         self.refresh();
-                        self.select_nearest_status_row(r, false, "");
+                        self.select_status_header(r, true);
                     } else {
                         self.activate();
                     }
@@ -1530,7 +1572,7 @@ impl App {
                     match self.expanded_ref.as_ref().and_then(|expanded| expanded.rows.get(i)) {
                         Some(ChangeTreeRow::Directory { .. }) => {
                             if change_tree_chevron_hit_at(
-                                x,
+                                row_x,
                                 self.expanded_ref.as_ref().and_then(|e| e.rows.get(i)),
                                 4,
                             ) || double
@@ -1641,11 +1683,10 @@ impl App {
         path: String,
         staged: bool,
     ) {
-        let entries_in_dir = self.entries_in_directory(repo, &path, staged);
         self.overlay = Some(Overlay::Menu {
             x,
             y,
-            target: MenuTarget::Directory { repo, path, staged, entries: entries_in_dir },
+            target: MenuTarget::Directory { repo, path, staged },
             entries: vec![
                 MenuEntry::Action(
                     MenuAction::StageOrUnstage,
@@ -2208,8 +2249,8 @@ impl App {
                 self.file_menu_action(action, repo, entry, staged)
             }
             MenuTarget::Drawer { kind, index } => self.drawer_menu_action(action, kind, index),
-            MenuTarget::Directory { repo, path, staged, entries } => match action {
-                MenuAction::StageOrUnstage => self.run_entries(repo, entries, staged),
+            MenuTarget::Directory { repo, path, staged } => match action {
+                MenuAction::StageOrUnstage => self.run_directory(repo, path, staged),
                 MenuAction::CopyRelativePath => self.copy_relative_path(&path),
                 _ => {}
             },
@@ -2709,23 +2750,21 @@ impl App {
         self.refresh();
     }
 
-    fn run_entries(&mut self, repo: usize, entries: Vec<FileEntry>, staged: bool) {
-        if entries.is_empty() {
-            return;
-        }
-        let preferred = entries[0].path.clone();
-        let repo_index = repo;
+    fn run_directory(&mut self, repo_index: usize, path: String, staged: bool) {
         let Some(repo) = self.repos.get(repo_index) else { return };
+        let entries = if staged { &repo.status.staged } else { &repo.status.unstaged };
+        let pathspecs = directory_pathspecs(&path, entries);
+        let pathspecs = pathspecs.iter().map(String::as_str).collect::<Vec<_>>();
         let result = if staged {
-            repo.git.unstage_entries(&entries)
+            repo.git.unstage_paths(&pathspecs)
         } else {
-            repo.git.stage_entries(&entries)
+            repo.git.stage_paths(&pathspecs)
         };
         if let Err(e) = result {
             self.flash = Some((e, true));
         }
         self.refresh();
-        self.select_nearest_status_row(repo_index, staged, &preferred);
+        self.select_nearest_status_row(repo_index, staged, &path);
     }
 
     fn select_nearest_status_row(&mut self, repo: usize, staged: bool, preferred: &str) {
@@ -2765,6 +2804,14 @@ impl App {
             .or_else(|| candidates.last())
             .map(|(index, _)| *index)
             .or(header);
+        if let Some(index) = selected {
+            self.select(index);
+        }
+    }
+
+    fn select_status_header(&mut self, repo: usize, staged: bool) {
+        let selected = status_header_index(&self.rows, repo, staged)
+            .or_else(|| status_header_index(&self.rows, repo, false));
         if let Some(index) = selected {
             self.select(index);
         }
@@ -2862,7 +2909,7 @@ impl App {
             self.flash = Some((e, true));
         }
         self.refresh();
-        self.select_nearest_status_row(active, false, "");
+        self.select_status_header(active, true);
     }
 
     fn unstage_all(&mut self) {
@@ -2872,7 +2919,7 @@ impl App {
             self.flash = Some((e, true));
         }
         self.refresh();
-        self.select_nearest_status_row(active, true, "");
+        self.select_status_header(active, false);
     }
 
     /// Kick off ✧ commit-message generation in the background.
@@ -3332,7 +3379,6 @@ impl App {
     }
 
     fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
-        let width = area.width as usize;
         let theme = self.theme;
         let active = self.active;
 
@@ -3359,8 +3405,10 @@ impl App {
             self.snap = false;
         }
         self.body = BodyGeom {
+            left: area.x,
             top: area.y,
             height: area.height,
+            width: area.width,
             offset: self.scroll,
         };
         // Git refreshes rebuild the row list, but a stationary pointer emits no new Moved event.
@@ -3375,6 +3423,8 @@ impl App {
             end += 1;
         }
         let visible = end - self.scroll;
+        self.body.width = list_content_width(area.width, self.rows.len(), visible);
+        let width = usize::from(self.body.width);
 
         let selected = self.selected;
         let list_focused = self.focus == Focus::List;
@@ -3884,8 +3934,10 @@ fn section_item(
     );
     // Hovering shows the section-wide stage/unstage glyph before the badge.
     let action_span = action.map(|a| Span::styled(format!("{a} "), Style::default().bold()));
-    let aw = action_span.as_ref().map(Span::width).unwrap_or(0);
-    let pad = width.saturating_sub(left.width() + badge.width() + 1 + aw).max(1);
+    let pad = action_span.as_ref().map_or_else(
+        || width.saturating_sub(left.width() + badge.width() + 1).max(1),
+        |_| section_action_start(title, width, count).saturating_sub(left.width()),
+    );
     let mut spans = vec![left, Span::raw(" ".repeat(pad))];
     if let Some(a) = action_span {
         spans.push(a);
@@ -4274,6 +4326,66 @@ mod tests {
         assert!(change_action_hit(35, 40));
         assert!(change_action_hit(37, 40));
         assert!(!change_action_hit(38, 40));
+    }
+
+    #[test]
+    fn section_action_hit_tracks_the_glyph_before_the_count_badge() {
+        assert_eq!(section_action_start("Changes", 28, 73), 21);
+        assert!(section_action_hit(20, "Changes", 28, 73));
+        assert!(section_action_hit(21, "Changes", 28, 73));
+        assert!(section_action_hit(22, "Changes", 28, 73));
+        assert!(!section_action_hit(23, "Changes", 28, 73));
+        assert!(!section_action_hit(24, "Changes", 28, 73));
+    }
+
+    #[test]
+    fn bulk_status_moves_target_the_destination_header() {
+        let mut staged = vec![Row::StagedHeader(0)];
+        staged.extend((0..73).map(|index| Row::Staged(0, index)));
+        staged.push(Row::ChangesHeader(0));
+        assert_eq!(status_header_index(&staged, 0, true), Some(0));
+        assert_eq!(status_header_index(&staged, 0, false), Some(74));
+
+        assert_eq!(status_header_index(&[Row::ChangesHeader(0)], 0, false), Some(0));
+    }
+
+    #[test]
+    fn overflowing_lists_reserve_the_scrollbar_column_before_action_layout() {
+        assert_eq!(list_content_width(30, 3, 20), 30);
+        assert_eq!(list_content_width(30, 73, 20), 29);
+        assert_eq!(list_content_width(1, 73, 20), 1);
+        assert_eq!(list_content_width(0, 73, 20), 0);
+
+        let content_width = list_content_width(30, 73, 20);
+        assert!(change_action_hit(24, content_width));
+        assert!(change_action_hit(26, content_width));
+        assert!(!change_action_hit(27, content_width));
+        assert!(!change_action_hit(29, content_width));
+    }
+
+    #[test]
+    fn directory_actions_use_one_prefix_and_preserve_external_rename_sources() {
+        let entries = vec![
+            FileEntry {
+                path: "src/nested/one.rs".into(),
+                orig: None,
+                letter: 'M',
+                stat: DiffStat::default(),
+            },
+            FileEntry {
+                path: "src/two.rs".into(),
+                orig: Some("legacy/two.rs".into()),
+                letter: 'R',
+                stat: DiffStat::default(),
+            },
+            FileEntry {
+                path: "README.md".into(),
+                orig: None,
+                letter: 'M',
+                stat: DiffStat::default(),
+            },
+        ];
+        assert_eq!(directory_pathspecs("src", &entries), ["src", "legacy/two.rs"]);
     }
 
     #[test]

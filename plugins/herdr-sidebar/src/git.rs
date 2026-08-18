@@ -157,16 +157,16 @@ impl Git {
 
     /// Stage one entry: `add -A` records modifications, additions, and deletions alike.
     pub fn stage(&self, entry: &FileEntry) -> Result<(), String> {
-        self.stage_entries(std::slice::from_ref(entry))
+        let paths = entry_paths(std::slice::from_ref(entry));
+        self.stage_paths(&paths)
     }
 
-    pub fn stage_entries(&self, entries: &[FileEntry]) -> Result<(), String> {
-        if entries.is_empty() {
+    pub fn stage_paths(&self, paths: &[&str]) -> Result<(), String> {
+        if paths.is_empty() {
             return Ok(());
         }
-        let paths = entry_paths(entries);
         let mut args = vec!["add", "-A", "--"];
-        args.extend(paths);
+        args.extend(paths.iter().copied());
         run_in(&self.root, &args).map(drop)
     }
 
@@ -187,14 +187,14 @@ impl Git {
     /// a deletion instead of unstaging), so it only runs for the unborn-branch
     /// case — any other `reset` failure is propagated instead of swallowed.
     pub fn unstage(&self, entry: &FileEntry) -> Result<(), String> {
-        self.unstage_entries(std::slice::from_ref(entry))
+        let paths = entry_paths(std::slice::from_ref(entry));
+        self.unstage_paths(&paths)
     }
 
-    pub fn unstage_entries(&self, entries: &[FileEntry]) -> Result<(), String> {
-        if entries.is_empty() {
+    pub fn unstage_paths(&self, paths: &[&str]) -> Result<(), String> {
+        if paths.is_empty() {
             return Ok(());
         }
-        let paths = entry_paths(entries);
         let mut args = vec!["reset", "-q", "--"];
         args.extend(paths.iter().copied());
         match run_in(&self.root, &args) {
@@ -202,7 +202,7 @@ impl Git {
             Err(e) if self.has_head() => Err(e),
             Err(_) => {
                 let mut args = vec!["rm", "--cached", "-r", "-q", "--"];
-                args.extend(paths);
+                args.extend(paths.iter().copied());
                 run_in(&self.root, &args).map(drop)
             }
         }
@@ -857,6 +857,53 @@ mod tests {
             std::process::Command::new("git").args(args).current_dir(&root).output().unwrap();
         }
         Git { root }
+    }
+
+    #[test]
+    fn directory_pathspec_stages_and_unstages_all_nested_changes() {
+        let git = repo_with_head("directory-pathspec");
+        let dir = git.root.join("src/nested");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("one.txt"), "base\n").unwrap();
+        std::fs::write(dir.join("two.txt"), "base\n").unwrap();
+        run_in(&git.root, &["add", "-A"]).unwrap();
+        run_in(
+            &git.root,
+            &[
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        )
+        .unwrap();
+
+        std::fs::write(dir.join("one.txt"), "changed\n").unwrap();
+        std::fs::remove_file(dir.join("two.txt")).unwrap();
+        std::fs::write(dir.join("three.txt"), "new\n").unwrap();
+
+        git.stage_paths(&["src"]).unwrap();
+        let mut staged = git.status().unwrap().staged;
+        staged.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(
+            staged.iter().map(|entry| (entry.path.as_str(), entry.letter)).collect::<Vec<_>>(),
+            [("src/nested/one.txt", 'M'), ("src/nested/three.txt", 'A'), ("src/nested/two.txt", 'D')]
+        );
+
+        git.unstage_paths(&["src"]).unwrap();
+        let status = git.status().unwrap();
+        assert!(status.staged.is_empty());
+        let mut unstaged = status.unstaged;
+        unstaged.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(
+            unstaged.iter().map(|entry| (entry.path.as_str(), entry.letter)).collect::<Vec<_>>(),
+            [("src/nested/one.txt", 'M'), ("src/nested/three.txt", 'U'), ("src/nested/two.txt", 'D')]
+        );
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 
     #[test]

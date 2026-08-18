@@ -391,7 +391,9 @@ HACKING.md — budget time for that before promising a patched build.
   right-edge scrollbar (`ui::draw_scrollbar`). Implementation note: ratatui's stateful
   List AUTO-SCROLLS to keep its selection visible, which fights wheel-scrolling — both
   views therefore window their rows manually (selected/scroll/snap fields) and render
-  a plain List of the visible slice.
+  a plain List of the visible slice. When the scrollbar is present its last column is
+  excluded from the list content width; right-edge actions render and hit-test against
+  that SAME reduced width, otherwise long-list clicks land on the row body instead.
 - Gotcha: after the ✧ suggestion lands, panel focus moves to the message box — letter keys
   then type text instead of triggering actions (Esc returns to the list).
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
@@ -426,7 +428,12 @@ HACKING.md — budget time for that before promising a patched build.
   directories first, defaults new paths open, and keeps separate in-process collapsed sets
   for Staged and Changes. Directory rows support chevron/name-double-click/Enter/Space/h/l,
   plus hover and context-menu bulk stage/unstage. `Collapse All` clears expanded history and
-  folds the inner trees as well as their outer sections.
+  folds the inner trees as well as their outer sections. A directory bulk action sends ONE Git
+  command with the directory prefix instead of expanding every descendant into argv (large trees
+  hit Unix `ARG_MAX` and the lower Windows command-line limit); a cross-directory rename adds only
+  the old path outside that prefix so both halves still move together. Directory operations restore
+  the nearest source-tree path, but section-wide Stage All / Unstage All select and scroll to the
+  destination Staged Changes / Changes header so a long moved file list does not jump the viewport.
 - **Git drawers** (title-case names, incl. Worktrees): drawer lines carry parsed
   refs (`DrawerRef` — commit hash / stash index / branch / remote / tag / worktree path,
   see `parse_drawer_ref`). Commits, Branches, Stashes, and Tags expand one file tree at a
@@ -439,9 +446,11 @@ HACKING.md — budget time for that before promising a patched build.
   retain their previous behavior. Ctrl+right-click opens
   per-type menus (checkout / merge / cherry-pick / revert / reset / stash apply-pop-drop /
   fetch / delete / copy); destructive ones route through the generic `Overlay::ConfirmGit`
-  y/N prompt. Hovered file rows show a `+`/`−` glyph (click zone = last 5 columns) and the
-  section headers a section-wide one (last 6); a dim "ctrl+rclick for menus" hint sits on
-  the « footer line whenever the footer is otherwise empty.
+  y/N prompt. Hovered file rows show a `+`/`−` glyph in their fixed action cell. Section
+  headers put the section-wide glyph immediately before the count badge; rendering and
+  hit-testing share `section_action_start` because the badge moves with the count's digit
+  width, and the badge itself must NOT trigger stage/unstage. A dim "ctrl+rclick for menus"
+  hint sits on the « footer line whenever the footer is otherwise empty.
 - **Diff statistics**: Changes and Staged each add one `git diff --numstat -z -M` query per
   existing status refresh; historical refs query name-status plus numstat once when opened.
   File rows keep a fixed action/status tail; every file/directory hover shows an anchored tooltip
@@ -454,8 +463,7 @@ HACKING.md — budget time for that before promising a patched build.
   directly up to 1 MiB each and 8 MiB
   total per refresh;
   larger files, symlinks, binary files, submodules, and unknown numstat values omit counters.
-  Rename trees use the new path and
-  render a dim `← old/path` suffix; staging/unstaging includes both pathspecs.
+  Rename trees use the new path and render a dim `← old/path` suffix.
 - **Sync Changes** (`S` or the ⇅ button, shown only when ahead/behind ≠ 0): `pull --rebase
   --autostash` then `push`, on a background thread polled from tick(). Ahead/behind parse
   from the porcelain `## branch...upstream [ahead N, behind M]` header.
