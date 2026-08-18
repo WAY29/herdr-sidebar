@@ -7,6 +7,7 @@
 //! - `active`: the view shown last, so a fresh sidebar opens where the user
 //!   left off.
 //! - `diff_theme`: syntax colors used by file previews and SCM diffs.
+//! - `hide_unmodified`: collapse unchanged diff context into expandable rows.
 //!
 //! Both views live in ONE binary; switching is an in-process re-render, and
 //! separated panes are the same binary pinned to a starting view with
@@ -154,6 +155,8 @@ pub struct State {
     pub icons: Option<crate::icons::IconTheme>,
     /// Syntax colors used by file previews and SCM diffs.
     pub diff_theme: crate::syntax::DiffTheme,
+    /// Collapse unchanged diff context into expandable summary rows.
+    pub hide_unmodified: bool,
     /// How changed and historical file collections are laid out in Source Control.
     pub scm_file_view: ScmFileView,
     /// The first-run "install a Nerd Font?" prompt was answered (either
@@ -174,6 +177,7 @@ impl Default for State {
             show_hotkeys: false,
             icons: None,
             diff_theme: crate::syntax::DEFAULT_DIFF_THEME,
+            hide_unmodified: true,
             scm_file_view: ScmFileView::Tree,
             font_prompt_done: false,
             auto_open: true,
@@ -252,11 +256,12 @@ pub fn save_state(state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"diff_theme\":\"{}\",\"scm_view\":\"{}\",\"font_prompt\":{},\"auto_open\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"diff_theme\":\"{}\",\"hide_unmodified\":{},\"scm_view\":\"{}\",\"font_prompt\":{},\"auto_open\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.show_hotkeys,
         state.diff_theme.as_name(),
+        state.hide_unmodified,
         state.scm_file_view.state_name(),
         state.font_prompt_done,
         state.auto_open
@@ -292,6 +297,10 @@ pub fn parse_state(json: &str) -> State {
             .and_then(|v| v.as_str())
             .and_then(crate::syntax::diff_theme_from_name)
             .unwrap_or(default.diff_theme),
+        hide_unmodified: value
+            .get("hide_unmodified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default.hide_unmodified),
         scm_file_view: value
             .get("scm_view")
             .and_then(|v| v.as_str())
@@ -320,15 +329,17 @@ mod tests {
             show_hotkeys: true,
             icons: Some(crate::icons::IconTheme::Emoji),
             diff_theme: crate::syntax::DiffTheme::Nord,
+            hide_unmodified: false,
             scm_file_view: ScmFileView::List,
             font_prompt_done: true,
             auto_open: false,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"diff_theme\":\"Nord\",\"scm_view\":\"list\",\"font_prompt\":true,\"auto_open\":false,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"diff_theme\":\"Nord\",\"hide_unmodified\":false,\"scm_view\":\"list\",\"font_prompt\":true,\"auto_open\":false,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open on.
         assert!(parse_state("{\"merged\":true}").auto_open);
+        assert!(parse_state("{\"merged\":true}").hide_unmodified);
         assert_eq!(parse_state("{\"merged\":true}").scm_file_view, ScmFileView::Tree);
         assert_eq!(parse_state("garbage"), State::default());
         assert_eq!(parse_state("{\"active\":\"bogus\"}"), State::default());

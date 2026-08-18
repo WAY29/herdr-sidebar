@@ -183,6 +183,8 @@ struct Doc {
     visual_lines: Vec<Line<'static>>,
     visual_rows: Vec<usize>,
     visual_width: u16,
+    first_change: Option<usize>,
+    center_first_change_pending: bool,
 }
 
 impl Doc {
@@ -203,6 +205,8 @@ impl Doc {
             visual_lines: Vec::new(),
             visual_rows: Vec::new(),
             visual_width: 0,
+            first_change: None,
+            center_first_change_pending: false,
         }
     }
 
@@ -229,6 +233,28 @@ impl Doc {
         } else {
             self.visual_rows.get(visual_row).copied()
         }
+    }
+
+    fn request_first_change_center(&mut self) {
+        self.center_first_change_pending = self.first_change.is_some();
+    }
+
+    fn apply_first_change_center(&mut self, height: u16) {
+        if !std::mem::take(&mut self.center_first_change_pending) {
+            return;
+        }
+        let Some(source_row) = self.first_change else { return };
+        let visual_row = if self.visual_width == 0 {
+            source_row
+        } else {
+            self.visual_rows
+                .iter()
+                .position(|row| *row == source_row)
+                .unwrap_or(source_row)
+        };
+        let height = usize::from(height).max(1);
+        let max_scroll = self.visual_len().saturating_sub(height);
+        self.scroll = visual_row.saturating_sub(height / 2).min(max_scroll);
     }
 }
 
@@ -334,20 +360,21 @@ fn reflow_diff_lines(
 fn load(
     request: &Request,
     diff_theme: DiffTheme,
+    hide_unmodified: bool,
     expanded_folds: &HashSet<crate::diffview::FoldId>,
 ) -> Doc {
     match request {
         Request::File(path) => load_file(path, diff_theme),
         Request::Diff { root, rel, kind } => {
-            load_diff(root, rel, kind, diff_theme, expanded_folds)
+            load_diff(root, rel, kind, diff_theme, hide_unmodified, expanded_folds)
         }
         Request::RefDiff { root, old_spec, new_spec, rel, old_rel } => load_ref_diff(
             root,
-            old_spec,
-            new_spec,
+            (old_spec, new_spec),
             rel,
             old_rel.as_deref(),
             diff_theme,
+            hide_unmodified,
             expanded_folds,
         ),
         Request::Show { root, spec, path } => load_show(root, spec, path.as_deref()),
@@ -489,17 +516,19 @@ fn load_diff(
     rel: &str,
     kind: &str,
     diff_theme: DiffTheme,
+    hide_unmodified: bool,
     expanded_folds: &HashSet<crate::diffview::FoldId>,
 ) -> Doc {
     let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
     // Plain (uncolored) diff: crate::diffview parses it and renders the
     // editor look — line gutter, tinted rows, syntax-highlighted code.
-    // ponytail: 5k context lines match the viewer's own display ceiling;
-    // larger gaps stay summarized instead of making git output unbounded.
+    // ponytail: keep Git context inside the viewer's 5k display ceiling;
+    // show-all mode splits that budget around each change.
+    let context = if hide_unmodified { MAX_LINES } else { MAX_LINES / 2 };
     let mut args: Vec<String> = vec![
         "diff".into(),
         "--no-ext-diff".into(),
-        format!("--unified={MAX_LINES}"),
+        format!("--unified={context}"),
     ];
     match kind {
         "staged" => args.push("--cached".into()),
@@ -514,35 +543,46 @@ fn load_diff(
     args.push("--".into());
     args.push(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
 
-    let (lines, folds) = run_structured_diff(root, rel, &args, diff_theme, expanded_folds);
+    let (lines, folds, first_change) = run_structured_diff(
+        root,
+        rel,
+        &args,
+        diff_theme,
+        hide_unmodified,
+        expanded_folds,
+    );
     let what = match kind {
         "staged" => "staged",
         "untracked" => "untracked",
         _ => "working tree",
     };
-    Doc::new(
+    let mut doc = Doc::new(
         name,
         format!("{} — {what} diff", root.join(rel).display()),
         lines,
         false,
         folds,
-    )
+    );
+    doc.first_change = first_change;
+    doc
 }
 
 fn load_ref_diff(
     root: &Path,
-    old_spec: &str,
-    new_spec: &str,
+    specs: (&str, &str),
     rel: &str,
     old_rel: Option<&str>,
     diff_theme: DiffTheme,
+    hide_unmodified: bool,
     expanded_folds: &HashSet<crate::diffview::FoldId>,
 ) -> Doc {
+    let (old_spec, new_spec) = specs;
+    let context = if hide_unmodified { MAX_LINES } else { MAX_LINES / 2 };
     let mut args = vec![
         "diff".to_string(),
         "--no-ext-diff".to_string(),
         "-M".to_string(),
-        format!("--unified={MAX_LINES}"),
+        format!("--unified={context}"),
         old_spec.to_string(),
         new_spec.to_string(),
         "--".to_string(),
@@ -551,14 +591,23 @@ fn load_ref_diff(
         args.push(old_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     }
     args.push(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let (lines, folds) = run_structured_diff(root, rel, &args, diff_theme, expanded_folds);
-    Doc::new(
+    let (lines, folds, first_change) = run_structured_diff(
+        root,
+        rel,
+        &args,
+        diff_theme,
+        hide_unmodified,
+        expanded_folds,
+    );
+    let mut doc = Doc::new(
         rel.rsplit('/').next().unwrap_or(rel).to_string(),
         format!("{} — {new_spec}", root.join(rel).display()),
         lines,
         false,
         folds,
-    )
+    );
+    doc.first_change = first_change;
+    doc
 }
 
 fn run_structured_diff(
@@ -566,30 +615,43 @@ fn run_structured_diff(
     rel: &str,
     args: &[String],
     diff_theme: DiffTheme,
+    hide_unmodified: bool,
     expanded_folds: &HashSet<crate::diffview::FoldId>,
-) -> (Vec<Line<'static>>, Vec<Option<crate::diffview::FoldId>>) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<Option<crate::diffview::FoldId>>,
+    Option<usize>,
+) {
     match std::process::Command::new("git").args(args).current_dir(root).output() {
-        Err(e) => (vec![Line::raw(format!("(git failed: {e})"))], Vec::new()),
+        Err(e) => (vec![Line::raw(format!("(git failed: {e})"))], Vec::new(), None),
         Ok(out) => {
             // --no-index exits 1 when the files differ; that's not an error.
             let text = String::from_utf8_lossy(&out.stdout);
             if text.trim().is_empty() {
                 let err = String::from_utf8_lossy(&out.stderr);
                 if err.trim().is_empty() {
-                    (vec![Line::raw("(no changes)")], Vec::new())
+                    (vec![Line::raw("(no changes)")], Vec::new(), None)
                 } else {
-                    (vec![Line::raw(format!("({})", err.trim()))], Vec::new())
+                    (vec![Line::raw(format!("({})", err.trim()))], Vec::new(), None)
                 }
             } else {
                 let mut rendered =
-                    crate::diffview::render_expanded(rel, &text, diff_theme, expanded_folds);
+                    crate::diffview::render_expanded(
+                        rel,
+                        &text,
+                        diff_theme,
+                        expanded_folds,
+                        hide_unmodified,
+                    );
                 if rendered.lines.len() > MAX_LINES {
                     rendered.lines.truncate(MAX_LINES);
                     rendered.folds.truncate(MAX_LINES);
+                    rendered.first_change =
+                        rendered.first_change.filter(|row| *row < MAX_LINES);
                     rendered.lines.push(Line::raw("… (truncated)"));
                     rendered.folds.push(None);
                 }
-                (rendered.lines, rendered.folds)
+                (rendered.lines, rendered.folds, rendered.first_change)
             }
         }
     }
@@ -673,6 +735,7 @@ pub struct InlinePreview {
     doc: Option<Doc>,
     theme: IconTheme,
     diff_theme: DiffTheme,
+    hide_unmodified: bool,
     expanded_folds: HashSet<crate::diffview::FoldId>,
     sidebar_width: u16,
     area: Rect,
@@ -707,6 +770,7 @@ impl InlinePreview {
                 state.icons,
             ),
             diff_theme: state.diff_theme,
+            hide_unmodified: state.hide_unmodified,
             expanded_folds: HashSet::new(),
             sidebar_width: 30,
             area: Rect::default(),
@@ -760,9 +824,20 @@ impl InlinePreview {
             return;
         }
         self.sidebar_width = width.max(1);
-        self.diff_theme = crate::state::load_state().diff_theme;
+        let state = crate::state::load_state();
+        self.diff_theme = state.diff_theme;
+        self.hide_unmodified = state.hide_unmodified;
         self.expanded_folds.clear();
-        self.doc = Some(load(&request, self.diff_theme, &self.expanded_folds));
+        let mut doc = load(
+            &request,
+            self.diff_theme,
+            self.hide_unmodified,
+            &self.expanded_folds,
+        );
+        if !self.hide_unmodified {
+            doc.request_first_change_center();
+        }
+        self.doc = Some(doc);
         self.current = Some(request);
         self.last_refresh = Instant::now();
     }
@@ -847,7 +922,7 @@ impl InlinePreview {
                 .flatten()
         {
             if self.expanded_folds.insert(fold) {
-                self.reload_current();
+                self.reload_current(false);
             }
             return;
         }
@@ -861,10 +936,16 @@ impl InlinePreview {
     }
 
     pub fn tick(&mut self) {
-        let selected_theme = crate::state::load_state().diff_theme;
-        if selected_theme != self.diff_theme {
-            self.diff_theme = selected_theme;
-            self.reload_current();
+        let state = crate::state::load_state();
+        let fold_setting_changed = state.hide_unmodified != self.hide_unmodified;
+        if state.diff_theme != self.diff_theme || fold_setting_changed {
+            let center_first_change = fold_setting_changed && !state.hide_unmodified;
+            self.diff_theme = state.diff_theme;
+            self.hide_unmodified = state.hide_unmodified;
+            if fold_setting_changed {
+                self.expanded_folds.clear();
+            }
+            self.reload_current(center_first_change);
         }
         if self.last_refresh.elapsed() < Duration::from_secs(2) {
             return;
@@ -874,16 +955,30 @@ impl InlinePreview {
             return;
         };
         let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
-        let mut doc = load(request, self.diff_theme, &self.expanded_folds);
+        let mut doc = load(
+            request,
+            self.diff_theme,
+            self.hide_unmodified,
+            &self.expanded_folds,
+        );
         doc.scroll = keep;
         self.doc = Some(doc);
     }
 
-    fn reload_current(&mut self) {
+    fn reload_current(&mut self, center_first_change: bool) {
         let Some(request) = self.current.as_ref() else { return };
         let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
-        let mut doc = load(request, self.diff_theme, &self.expanded_folds);
-        doc.scroll = keep;
+        let mut doc = load(
+            request,
+            self.diff_theme,
+            self.hide_unmodified,
+            &self.expanded_folds,
+        );
+        if center_first_change {
+            doc.request_first_change_center();
+        } else {
+            doc.scroll = keep;
+        }
         self.doc = Some(doc);
         self.last_refresh = Instant::now();
     }
@@ -927,11 +1022,18 @@ pub fn run(control: &Path) -> std::io::Result<()> {
         state.icons,
     );
     let mut diff_theme = state.diff_theme;
+    let mut hide_unmodified = state.hide_unmodified;
     let mut current = read_control(control);
     let mut expanded_folds = HashSet::new();
     let mut doc = current
         .as_ref()
-        .map(|request| load(request, diff_theme, &expanded_folds))
+        .map(|request| {
+            let mut doc = load(request, diff_theme, hide_unmodified, &expanded_folds);
+            if !hide_unmodified {
+                doc.request_first_change_center();
+            }
+            doc
+        })
         .unwrap_or_else(|| {
             Doc::new(
                 "(nothing to show)".into(),
@@ -995,7 +1097,12 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                             && let Some(request) = &current
                         {
                             let keep = doc.scroll;
-                            doc = load(request, diff_theme, &expanded_folds);
+                            doc = load(
+                                request,
+                                diff_theme,
+                                hide_unmodified,
+                                &expanded_folds,
+                            );
                             doc.scroll = keep;
                         }
                     }
@@ -1014,17 +1121,32 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                 current = target;
                 expanded_folds.clear();
                 if let Some(request) = &current {
-                    diff_theme = crate::state::load_state().diff_theme;
-                    doc = load(request, diff_theme, &expanded_folds);
+                    let state = crate::state::load_state();
+                    diff_theme = state.diff_theme;
+                    hide_unmodified = state.hide_unmodified;
+                    doc = load(request, diff_theme, hide_unmodified, &expanded_folds);
+                    if !hide_unmodified {
+                        doc.request_first_change_center();
+                    }
                     report_identity(&doc.name);
                 }
             } else if beat.is_multiple_of(8)
                 && let Some(request @ Request::Diff { .. }) = &current
             {
                 let keep = doc.scroll;
-                diff_theme = crate::state::load_state().diff_theme;
-                doc = load(request, diff_theme, &expanded_folds);
-                doc.scroll = keep;
+                let state = crate::state::load_state();
+                let fold_setting_changed = state.hide_unmodified != hide_unmodified;
+                if fold_setting_changed {
+                    expanded_folds.clear();
+                }
+                diff_theme = state.diff_theme;
+                hide_unmodified = state.hide_unmodified;
+                doc = load(request, diff_theme, hide_unmodified, &expanded_folds);
+                if fold_setting_changed && !hide_unmodified {
+                    doc.request_first_change_center();
+                } else {
+                    doc.scroll = keep;
+                }
             }
         }
     };
@@ -1052,6 +1174,7 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> (
     .areas(area);
 
     doc.ensure_visual_lines(body.width);
+    doc.apply_first_change_center(body.height);
     doc.scroll = doc
         .scroll
         .min(doc.visual_len().saturating_sub(usize::from(body.height).max(1)));
@@ -1595,6 +1718,29 @@ mod tests {
             .any(|span| span.style.bg == Some(word_bg)));
         assert!(rows[..wrapped].iter().all(|&row| row == 0));
         assert_eq!(rows[wrapped], 1);
+    }
+
+    #[test]
+    fn first_change_centers_once_after_diff_reflow() {
+        let mut lines = vec![
+            Line::from(vec![Span::raw(" 1 "), Span::raw("▌ "), Span::raw("abcdefghij")]),
+            Line::raw("context 1"),
+            Line::raw("first change"),
+        ];
+        lines.extend((2..=7).map(|n| Line::raw(format!("context {n}"))));
+        let folds = vec![None; lines.len()];
+        let mut doc = Doc::new("x.rs".into(), String::new(), lines, false, folds);
+        doc.first_change = Some(2);
+        doc.request_first_change_center();
+        doc.ensure_visual_lines(10);
+
+        assert_eq!(doc.visual_rows.iter().position(|row| *row == 2), Some(3));
+        doc.apply_first_change_center(5);
+        assert_eq!(doc.scroll, 1);
+
+        doc.scroll = 4;
+        doc.apply_first_change_center(5);
+        assert_eq!(doc.scroll, 4, "centering must not repeat after user scrolling");
     }
 
     #[test]

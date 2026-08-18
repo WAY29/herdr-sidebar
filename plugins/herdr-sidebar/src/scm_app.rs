@@ -609,6 +609,7 @@ enum Setting {
     UnifiedSidebar,
     IconTheme,
     DiffTheme,
+    HideUnmodified,
     ScmView,
     AutoOpen,
     Hotkeys,
@@ -2064,6 +2065,12 @@ impl App {
                 true,
             ),
             (
+                Setting::HideUnmodified,
+                "Hide unmodified lines",
+                if self.sidebar_state.hide_unmodified { "on" } else { "off" }.to_string(),
+                true,
+            ),
+            (
                 Setting::ScmView,
                 "SCM file view",
                 self.sidebar_state.scm_file_view.label().to_string(),
@@ -2109,6 +2116,10 @@ impl App {
             }
             Setting::IconTheme => self.set_theme(self.theme.toggled()),
             Setting::DiffTheme => self.open_theme_picker(),
+            Setting::HideUnmodified => {
+                self.sidebar_state.hide_unmodified = !self.sidebar_state.hide_unmodified;
+                sidebar::save_state(self.sidebar_state);
+            }
             Setting::ScmView => {
                 self.sidebar_state.scm_file_view = self.sidebar_state.scm_file_view.toggled();
                 sidebar::save_state(self.sidebar_state);

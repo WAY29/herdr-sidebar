@@ -45,6 +45,7 @@ pub struct FoldId {
 pub struct RenderedDiff {
     pub lines: Vec<Line<'static>>,
     pub folds: Vec<Option<FoldId>>,
+    pub first_change: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -270,7 +271,7 @@ fn overlay_bg(spans: Vec<Span<'static>>, range: (usize, usize), bg: Color) -> Ve
 /// Render a unified diff for `rel` (its extension picks the grammar) into
 /// display lines: line number + change bar, tinted rows, highlighted code.
 pub fn render(rel: &str, diff: &str, diff_theme: DiffTheme) -> Vec<Line<'static>> {
-    render_expanded(rel, diff, diff_theme, &HashSet::new()).lines
+    render_expanded(rel, diff, diff_theme, &HashSet::new(), true).lines
 }
 
 /// Render a diff while replacing selected context folds with their retained rows.
@@ -279,10 +280,15 @@ pub fn render_expanded(
     diff: &str,
     diff_theme: DiffTheme,
     expanded: &HashSet<FoldId>,
+    hide_unmodified: bool,
 ) -> RenderedDiff {
     let evs = parse_events(diff);
     let ranges = word_ranges(&evs);
-    let fold_ranges = fold_ranges(&evs);
+    let fold_ranges = if hide_unmodified {
+        fold_ranges(&evs)
+    } else {
+        Vec::new()
+    };
 
     let max_no = evs
         .iter()
@@ -314,6 +320,7 @@ pub fn render_expanded(
 
     let mut lines = Vec::new();
     let mut folds = Vec::new();
+    let mut first_change = None;
     let mut pending_folds = fold_ranges.iter().peekable();
     let mut idx = 0;
     while idx < evs.len() {
@@ -367,6 +374,7 @@ pub fn render_expanded(
                 lines.push(Line::from(all));
             }
             Ev::Del(o, t) => {
+                first_change.get_or_insert(lines.len());
                 let mut spans = old_hl.line(t);
                 if let Some(&range) = ranges.get(&idx) {
                     spans = overlay_bg(spans, range, DEL_WORD_BG);
@@ -376,6 +384,7 @@ pub fn render_expanded(
                 lines.push(Line::from(all).style(Style::default().bg(DEL_BG)));
             }
             Ev::Add(n, t) => {
+                first_change.get_or_insert(lines.len());
                 let mut spans = new_hl.line(t);
                 if let Some(&range) = ranges.get(&idx) {
                     spans = overlay_bg(spans, range, ADD_WORD_BG);
@@ -388,7 +397,7 @@ pub fn render_expanded(
         folds.push(None);
         idx += 1;
     }
-    RenderedDiff { lines, folds }
+    RenderedDiff { lines, folds, first_change }
 }
 
 #[cfg(test)]
@@ -497,7 +506,8 @@ mod tests {
             }
         }
 
-        let collapsed = render_expanded("x.txt", &diff, DEFAULT_DIFF_THEME, &HashSet::new());
+        let collapsed =
+            render_expanded("x.txt", &diff, DEFAULT_DIFF_THEME, &HashSet::new(), true);
         assert_eq!(collapsed.lines.len(), collapsed.folds.len());
         let (row, fold) = collapsed
             .folds
@@ -512,8 +522,15 @@ mod tests {
             &diff,
             DEFAULT_DIFF_THEME,
             &HashSet::from([fold]),
+            true,
         );
         assert_eq!(expanded.lines.len(), collapsed.lines.len() + 5);
         assert!(expanded.lines.iter().any(|line| line.to_string().contains("line 1")));
+
+        let shown = render_expanded("x.txt", &diff, DEFAULT_DIFF_THEME, &HashSet::new(), false);
+        assert_eq!(shown.lines.len(), 21);
+        assert_eq!(shown.first_change, Some(9));
+        assert!(shown.folds.iter().all(Option::is_none));
+        assert!(shown.lines.iter().all(|line| !line.to_string().contains("unmodified lines")));
     }
 }

@@ -81,6 +81,8 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
 - **Tree or list layout** — changed and historical files default to a compact folder tree,
   including deleted paths; switch the global SCM file view in ⚙ Settings when a flat list
   is more useful. Folder rows fold, bulk-stage/unstage, and expose path-aware context menus.
+- Structured diffs hide long unchanged sections by default; toggle **Hide unmodified lines**
+  in ⚙ Settings to show all retained context immediately and center the first change.
 - **✧ AI commit messages** — the sparkle button sends the pending diff to your local
   `claude` CLI and drops a drafted subject line into the message box. No claude? A clean
   filename-based fallback kicks in. Never blocks the UI.
