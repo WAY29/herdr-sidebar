@@ -842,6 +842,9 @@ impl App {
     }
 
     fn hovered_change_tooltip(&self) -> Option<ChangeTooltip> {
+        if !title_actions_visible(self.last_mouse) {
+            return None;
+        }
         let row = *self.rows.get(self.hovered?)?;
         match row {
             Row::Staged(repo, row) => {
