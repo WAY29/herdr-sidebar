@@ -147,6 +147,7 @@ enum Setting {
     UnifiedSidebar,
     IconTheme,
     DiffTheme,
+    ScmView,
     AutoOpen,
     HiddenFiles,
     Hotkeys,
@@ -889,6 +890,12 @@ impl App {
                 true,
             ),
             (
+                Setting::ScmView,
+                "SCM file view",
+                self.sidebar_state.scm_file_view.label().to_string(),
+                true,
+            ),
+            (
                 Setting::HiddenFiles,
                 "Hidden files",
                 if self.tree.show_hidden { "shown" } else { "hidden" }.to_string(),
@@ -931,6 +938,10 @@ impl App {
             }
             Setting::IconTheme => self.set_theme(self.theme.toggled()),
             Setting::DiffTheme => self.open_theme_picker(),
+            Setting::ScmView => {
+                self.sidebar_state.scm_file_view = self.sidebar_state.scm_file_view.toggled();
+                sidebar::save_state(self.sidebar_state);
+            }
             Setting::HiddenFiles => {
                 self.tree.show_hidden = !self.tree.show_hidden;
                 self.rebuild();

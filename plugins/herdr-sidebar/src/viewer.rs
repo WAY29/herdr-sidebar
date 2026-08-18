@@ -89,6 +89,13 @@ enum Request {
         /// "staged" | "worktree" | "untracked" — which diff to run.
         kind: String,
     },
+    RefDiff {
+        root: PathBuf,
+        old_spec: String,
+        new_spec: String,
+        rel: String,
+        old_rel: Option<String>,
+    },
     /// `git show <spec>` — a commit, stash, tag, or branch tip, optionally
     /// narrowed to one file.
     Show {
@@ -106,6 +113,21 @@ pub fn file_request(path: &Path) -> String {
 /// Control-file payload for a git diff (`kind`: staged | worktree | untracked).
 pub fn diff_request(root: &Path, rel: &str, kind: &str) -> String {
     format!("diff\t{}\t{rel}\t{kind}", root.display())
+}
+
+/// Immutable structured diff between two revisions for one historical file.
+pub fn ref_diff_request(
+    root: &Path,
+    old_spec: &str,
+    new_spec: &str,
+    rel: &str,
+    old_rel: Option<&str>,
+) -> String {
+    format!(
+        "refdiff\t{}\t{old_spec}\t{new_spec}\t{rel}\t{}",
+        root.display(),
+        old_rel.unwrap_or("")
+    )
 }
 
 /// Control-file payload for `git show <spec>` (commit hash, stash@{n}, tag…),
@@ -132,6 +154,14 @@ fn parse_request(raw: &str) -> Option<Request> {
             let spec = parts.next()?.to_string();
             let path = parts.next().filter(|p| !p.is_empty()).map(str::to_string);
             Some(Request::Show { root, spec, path })
+        }
+        Some("refdiff") => {
+            let root = PathBuf::from(parts.next()?);
+            let old_spec = parts.next()?.to_string();
+            let new_spec = parts.next()?.to_string();
+            let rel = parts.next()?.to_string();
+            let old_rel = parts.next().filter(|path| !path.is_empty()).map(str::to_string);
+            Some(Request::RefDiff { root, old_spec, new_spec, rel, old_rel })
         }
         Some("file") => Some(Request::File(PathBuf::from(parts.next()?))),
         // Legacy: a bare path.
@@ -160,6 +190,15 @@ fn load(
         Request::Diff { root, rel, kind } => {
             load_diff(root, rel, kind, diff_theme, expanded_folds)
         }
+        Request::RefDiff { root, old_spec, new_spec, rel, old_rel } => load_ref_diff(
+            root,
+            old_spec,
+            new_spec,
+            rel,
+            old_rel.as_deref(),
+            diff_theme,
+            expanded_folds,
+        ),
         Request::Show { root, spec, path } => load_show(root, spec, path.as_deref()),
     }
 }
@@ -332,11 +371,63 @@ fn load_diff(
     args.push("--".into());
     args.push(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
 
-    let output = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(root)
-        .output();
-    let (lines, folds) = match output {
+    let (lines, folds) = run_structured_diff(root, rel, &args, diff_theme, expanded_folds);
+    let what = match kind {
+        "staged" => "staged",
+        "untracked" => "untracked",
+        _ => "working tree",
+    };
+    Doc {
+        name: name.clone(),
+        context: format!("{} — {what} diff", root.join(rel).display()),
+        lines,
+        numbered: false,
+        scroll: 0,
+        folds,
+    }
+}
+
+fn load_ref_diff(
+    root: &Path,
+    old_spec: &str,
+    new_spec: &str,
+    rel: &str,
+    old_rel: Option<&str>,
+    diff_theme: DiffTheme,
+    expanded_folds: &HashSet<crate::diffview::FoldId>,
+) -> Doc {
+    let mut args = vec![
+        "diff".to_string(),
+        "--no-ext-diff".to_string(),
+        "-M".to_string(),
+        format!("--unified={MAX_LINES}"),
+        old_spec.to_string(),
+        new_spec.to_string(),
+        "--".to_string(),
+    ];
+    if let Some(old_rel) = old_rel.filter(|old_rel| *old_rel != rel) {
+        args.push(old_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    }
+    args.push(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let (lines, folds) = run_structured_diff(root, rel, &args, diff_theme, expanded_folds);
+    Doc {
+        name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+        context: format!("{} — {new_spec}", root.join(rel).display()),
+        lines,
+        numbered: false,
+        scroll: 0,
+        folds,
+    }
+}
+
+fn run_structured_diff(
+    root: &Path,
+    rel: &str,
+    args: &[String],
+    diff_theme: DiffTheme,
+    expanded_folds: &HashSet<crate::diffview::FoldId>,
+) -> (Vec<Line<'static>>, Vec<Option<crate::diffview::FoldId>>) {
+    match std::process::Command::new("git").args(args).current_dir(root).output() {
         Err(e) => (vec![Line::raw(format!("(git failed: {e})"))], Vec::new()),
         Ok(out) => {
             // --no-index exits 1 when the files differ; that's not an error.
@@ -360,19 +451,6 @@ fn load_diff(
                 (rendered.lines, rendered.folds)
             }
         }
-    };
-    let what = match kind {
-        "staged" => "staged",
-        "untracked" => "untracked",
-        _ => "working tree",
-    };
-    Doc {
-        name: name.clone(),
-        context: format!("{} — {what} diff", root.join(rel).display()),
-        lines,
-        numbered: false,
-        scroll: 0,
-        folds,
     }
 }
 
@@ -1195,6 +1273,23 @@ mod tests {
                 root: PathBuf::from("C:/repo"),
                 rel: "src/a.rs".into(),
                 kind: "staged".into()
+            })
+        );
+        let d = ref_diff_request(
+            Path::new("C:/repo"),
+            "parent",
+            "commit",
+            "src/new.rs",
+            Some("old.rs"),
+        );
+        assert_eq!(
+            parse_request(&d),
+            Some(Request::RefDiff {
+                root: PathBuf::from("C:/repo"),
+                old_spec: "parent".into(),
+                new_spec: "commit".into(),
+                rel: "src/new.rs".into(),
+                old_rel: Some("old.rs".into()),
             })
         );
         // Legacy bare path still works.

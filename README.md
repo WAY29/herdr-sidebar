@@ -76,7 +76,11 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
   the preview pane (staged vs working tree respected, untracked shown as additions), and
   the diff live-updates while you edit.
 - **Stage, unstage, discard, commit** — by key or click, with Staged/Changes sections,
-  count badges, and familiar per-file status letters.
+  count badges and familiar per-file status letters; hover a file or folder for its full path and
+  green/red `+N -N` line totals.
+- **Tree or list layout** — changed and historical files default to a compact folder tree,
+  including deleted paths; switch the global SCM file view in ⚙ Settings when a flat list
+  is more useful. Folder rows fold, bulk-stage/unstage, and expose path-aware context menus.
 - **✧ AI commit messages** — the sparkle button sends the pending diff to your local
   `claude` CLI and drops a drafted subject line into the message box. No claude? A clean
   filename-based fallback kicks in. Never blocks the UI.
@@ -84,8 +88,9 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
   press runs `pull --rebase --autostash` + `push` in the background.
 - **Multi-repo** — child repositories are auto-discovered, each with its
   own header (branch, dirty `*`, sync/commit icons), message box, and Commit button.
-- **History drawers**: GRAPH, COMMITS, FILE HISTORY (follows your selection), BRANCHES,
-  REMOTES, STASHES, TAGS.
+- **History drawers**: GRAPH, COMMITS, FILE HISTORY (follows renames), BRANCHES, REMOTES,
+  STASHES, TAGS. Commits, branches, stashes, and tags expand into file trees whose leaves
+  open the same structured, syntax-highlighted diff as live changes.
 - **Auto-refreshing** — commits and edits made anywhere show up within seconds.
 
 ## Prefer two panels? Take two panels.
@@ -148,7 +153,7 @@ CaskaydiaCove). Also recommended: the
 
 | Explorer | | Source Control | |
 |---|---|---|---|
-| `↑↓` / `jk` | move | `⏎` | stage / unstage |
+| `↑↓` / `jk` | move | `⏎` | stage / unstage · fold folder |
 | `←→` / `hl` | fold / unfold | `a` / `u` | stage all / none |
 | `⏎` | toggle folder · preview file | `c` | focus message box |
 | `r` | refresh | `A` | ✧ suggest message |

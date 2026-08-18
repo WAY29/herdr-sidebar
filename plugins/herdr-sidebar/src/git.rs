@@ -4,11 +4,20 @@
 //! so the repo-relative paths porcelain reports resolve even when the pane's
 //! cwd is a subdirectory.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiffStat {
+    pub added: Option<usize>,
+    pub deleted: Option<usize>,
+}
+
 /// One file in the staged or unstaged list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileEntry {
     /// Repo-relative path (the new path, for renames), `/`-separated as git reports it.
     pub path: String,
@@ -17,6 +26,22 @@ pub struct FileEntry {
     /// The VS Code-style status letter to display: M, A, D, R, C, U (untracked),
     /// or `!` for merge conflicts.
     pub letter: char,
+    /// Text-line counts. `None` means Git reported binary/unknown.
+    pub stat: DiffStat,
+}
+
+/// A historical file plus the immutable revision pair its diff compares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefFile {
+    pub entry: FileEntry,
+    pub old_spec: String,
+    pub new_spec: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileHistoryEntry {
+    pub line: String,
+    pub file: RefFile,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -97,12 +122,52 @@ impl Git {
             &self.root,
             &["status", "--porcelain", "-z", "--branch", "--untracked-files=all"],
         )?;
-        Ok(parse_status(&out))
+        let mut status = parse_status(&out);
+        if let Ok(raw) = run_in(
+            &self.root,
+            &["diff", "--numstat", "-z", "-M", "--ignore-submodules=all", "--no-ext-diff"],
+        ) {
+            attach_stats(&mut status.unstaged, &parse_numstat(&raw));
+        }
+        if let Ok(raw) = run_in(
+            &self.root,
+            &[
+                "diff",
+                "--cached",
+                "--numstat",
+                "-z",
+                "-M",
+                "--ignore-submodules=all",
+                "--no-ext-diff",
+            ],
+        ) {
+            attach_stats(&mut status.staged, &parse_numstat(&raw));
+        }
+        let mut untracked_budget = 8 * 1024 * 1024;
+        for entry in &mut status.unstaged {
+            if entry.letter == 'U' {
+                entry.stat = DiffStat {
+                    added: text_line_count(&self.root.join(&entry.path), &mut untracked_budget),
+                    deleted: Some(0),
+                };
+            }
+        }
+        Ok(status)
     }
 
     /// Stage one entry: `add -A` records modifications, additions, and deletions alike.
     pub fn stage(&self, entry: &FileEntry) -> Result<(), String> {
-        run_in(&self.root, &["add", "-A", "--", &entry.path]).map(drop)
+        self.stage_entries(std::slice::from_ref(entry))
+    }
+
+    pub fn stage_entries(&self, entries: &[FileEntry]) -> Result<(), String> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let paths = entry_paths(entries);
+        let mut args = vec!["add", "-A", "--"];
+        args.extend(paths);
+        run_in(&self.root, &args).map(drop)
     }
 
     pub fn stage_all(&self) -> Result<(), String> {
@@ -122,14 +187,24 @@ impl Git {
     /// a deletion instead of unstaging), so it only runs for the unborn-branch
     /// case — any other `reset` failure is propagated instead of swallowed.
     pub fn unstage(&self, entry: &FileEntry) -> Result<(), String> {
-        let mut args = vec!["reset", "-q", "--", entry.path.as_str()];
-        if let Some(orig) = &entry.orig {
-            args.push(orig);
+        self.unstage_entries(std::slice::from_ref(entry))
+    }
+
+    pub fn unstage_entries(&self, entries: &[FileEntry]) -> Result<(), String> {
+        if entries.is_empty() {
+            return Ok(());
         }
+        let paths = entry_paths(entries);
+        let mut args = vec!["reset", "-q", "--"];
+        args.extend(paths.iter().copied());
         match run_in(&self.root, &args) {
             Ok(_) => Ok(()),
             Err(e) if self.has_head() => Err(e),
-            Err(_) => run_in(&self.root, &["rm", "--cached", "-r", "-q", "--", &entry.path]).map(drop),
+            Err(_) => {
+                let mut args = vec!["rm", "--cached", "-r", "-q", "--"];
+                args.extend(paths);
+                run_in(&self.root, &args).map(drop)
+            }
         }
     }
 
@@ -199,9 +274,98 @@ impl Git {
         )?)
     }
 
-    pub fn file_history(&self, path: &str, limit: usize) -> Result<Vec<String>, String> {
+    pub fn file_history(&self, path: &str, limit: usize) -> Result<Vec<FileHistoryEntry>, String> {
         let n = format!("-{limit}");
-        lines(run_in(&self.root, &["log", "--oneline", "--follow", &n, "--", path])?)
+        let out = run_in(
+            &self.root,
+            &[
+                "log",
+                &n,
+                "--follow",
+                "-M",
+                "-z",
+                "--name-status",
+                "--format=%x1e%H%x00%P%x00%s%x00",
+                "--",
+                path,
+            ],
+        )?;
+        Ok(parse_file_history(&out))
+    }
+
+    /// Files introduced by a commit-ish ref relative to its first parent.
+    pub fn ref_files(&self, spec: &str) -> Result<Vec<RefFile>, String> {
+        let peeled = format!("{spec}^{{commit}}");
+        let commit = run_in(&self.root, &["rev-parse", "--verify", &peeled])?;
+        let commit = commit.trim();
+        let old = self.first_parent_or_empty(commit)?;
+        self.range_files(&old, commit)
+    }
+
+    /// A stash's final tracked snapshot plus any third-parent untracked tree.
+    pub fn stash_files(&self, spec: &str) -> Result<Vec<RefFile>, String> {
+        let commit = run_in(&self.root, &["rev-parse", "--verify", spec])?;
+        let commit = commit.trim();
+        let base = self.first_parent_or_empty(commit)?;
+        let mut files = self.range_files(&base, commit)?;
+        let third = format!("{commit}^3");
+        if let Ok(untracked) = run_in(&self.root, &["rev-parse", "--verify", &third]) {
+            let untracked = untracked.trim();
+            let seen: HashSet<String> = files.iter().map(|file| file.entry.path.clone()).collect();
+            files.extend(
+                self.range_files(EMPTY_TREE, untracked)?
+                    .into_iter()
+                    .filter(|file| !seen.contains(&file.entry.path)),
+            );
+        }
+        Ok(files)
+    }
+
+    fn first_parent_or_empty(&self, commit: &str) -> Result<String, String> {
+        let out = run_in(&self.root, &["rev-list", "--parents", "-n", "1", commit])?;
+        Ok(out.split_whitespace().nth(1).unwrap_or(EMPTY_TREE).to_string())
+    }
+
+    fn range_files(&self, old: &str, new: &str) -> Result<Vec<RefFile>, String> {
+        let names = run_in(
+            &self.root,
+            &[
+                "diff",
+                "--name-status",
+                "-z",
+                "-M",
+                "--ignore-submodules=none",
+                "--no-ext-diff",
+                old,
+                new,
+            ],
+        )?;
+        let stats = run_in(
+            &self.root,
+            &[
+                "diff",
+                "--numstat",
+                "-z",
+                "-M",
+                "--ignore-submodules=all",
+                "--no-ext-diff",
+                old,
+                new,
+            ],
+        )
+        .map(|raw| parse_numstat(&raw))
+        .unwrap_or_default();
+        Ok(parse_name_status(&names)
+            .into_iter()
+            .map(|mut entry| {
+                entry.stat = stats.get(&entry.path).copied().unwrap_or_default();
+                RefFile {
+                    entry,
+                    old_spec: old.to_string(),
+                    new_spec: new.to_string(),
+                }
+            })
+            .collect())
     }
 
     /// Local + remote branches, the current one first and starred.
@@ -269,6 +433,141 @@ fn run_in(dir: &Path, args: &[&str]) -> Result<String, String> {
         .to_string())
 }
 
+fn entry_paths(entries: &[FileEntry]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for entry in entries {
+        for path in std::iter::once(entry.path.as_str()).chain(entry.orig.as_deref()) {
+            if seen.insert(path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+fn attach_stats(entries: &mut [FileEntry], stats: &HashMap<String, DiffStat>) {
+    for entry in entries {
+        entry.stat = stats.get(&entry.path).copied().unwrap_or_default();
+    }
+}
+
+/// Git does not include untracked files in numstat. Keep the synchronous
+/// refresh bounded; large or NUL-containing files simply omit the counters.
+fn text_line_count(path: &Path, remaining_bytes: &mut u64) -> Option<usize> {
+    const MAX_BYTES: u64 = 1024 * 1024;
+    // ponytail: bounded per-file and per-refresh reads; cache when exhaustive
+    // untracked-file stats matter more than SCM refresh latency.
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > MAX_BYTES
+        || metadata.len() > *remaining_bytes
+    {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    *remaining_bytes = remaining_bytes.saturating_sub(metadata.len());
+    if bytes.contains(&0) {
+        return None;
+    }
+    Some(bytes.iter().filter(|byte| **byte == b'\n').count() + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n')))
+}
+
+pub fn parse_numstat(raw: &str) -> HashMap<String, DiffStat> {
+    let mut stats = HashMap::new();
+    let mut parts = raw.split('\0');
+    while let Some(head) = parts.next() {
+        let head = head.trim_start_matches('\n');
+        if head.is_empty() {
+            continue;
+        }
+        let mut columns = head.splitn(3, '\t');
+        let Some(added) = columns.next() else { continue };
+        let Some(deleted) = columns.next() else { continue };
+        let Some(path) = columns.next() else { continue };
+        let path = if path.is_empty() {
+            let _orig = parts.next();
+            parts.next().unwrap_or("")
+        } else {
+            path
+        };
+        if path.is_empty() {
+            continue;
+        }
+        stats.insert(
+            path.to_string(),
+            DiffStat {
+                added: parse_count(added),
+                deleted: parse_count(deleted),
+            },
+        );
+    }
+    stats
+}
+
+fn parse_count(value: &str) -> Option<usize> {
+    if value == "-" { None } else { value.parse().ok() }
+}
+
+fn parse_name_status(raw: &str) -> Vec<FileEntry> {
+    let mut files = Vec::new();
+    let mut parts = raw.split('\0');
+    while let Some(status) = parts.next() {
+        let status = status.trim_start_matches('\n');
+        if status.is_empty() {
+            continue;
+        }
+        let letter = display_letter(status.chars().next().unwrap_or('M'));
+        let (orig, path) = if matches!(letter, 'R' | 'C') {
+            (parts.next().map(str::to_string), parts.next())
+        } else {
+            (None, parts.next())
+        };
+        let Some(path) = path.filter(|path| !path.is_empty()) else { continue };
+        files.push(FileEntry {
+            path: path.to_string(),
+            orig,
+            letter,
+            stat: DiffStat::default(),
+        });
+    }
+    files
+}
+
+fn parse_file_history(raw: &str) -> Vec<FileHistoryEntry> {
+    let mut history = Vec::new();
+    for record in raw.split('\x1e').skip(1) {
+        let mut fields = record.split('\0');
+        let Some(hash) = fields.next().filter(|value| !value.is_empty()) else { continue };
+        let parents = fields.next().unwrap_or("");
+        let subject = fields.next().unwrap_or("");
+        let mut tail = fields.map(|field| field.trim_start_matches('\n')).filter(|field| !field.is_empty());
+        let Some(status) = tail.next() else { continue };
+        let letter = display_letter(status.chars().next().unwrap_or('M'));
+        let (orig, path) = if matches!(letter, 'R' | 'C') {
+            (tail.next().map(str::to_string), tail.next())
+        } else {
+            (None, tail.next())
+        };
+        let Some(path) = path else { continue };
+        let short = &hash[..hash.len().min(7)];
+        history.push(FileHistoryEntry {
+            line: format!("{short} {subject}"),
+            file: RefFile {
+                entry: FileEntry {
+                    path: path.to_string(),
+                    orig,
+                    letter,
+                    stat: DiffStat::default(),
+                },
+                old_spec: parents.split_whitespace().next().unwrap_or(EMPTY_TREE).to_string(),
+                new_spec: hash.to_string(),
+            },
+        });
+    }
+    history
+}
+
 /// Parse `git status --porcelain -z --branch` output. Entries are NUL-separated
 /// `XY path`; a rename/copy is followed by a second NUL-separated field holding
 /// the source path. X is the index (staged) state, Y the worktree state.
@@ -296,14 +595,24 @@ pub fn parse_status(raw: &str) -> Status {
         };
         let path = path.to_string();
         if x == '?' && y == '?' {
-            status.unstaged.push(FileEntry { path, orig: None, letter: 'U' });
+            status.unstaged.push(FileEntry {
+                path,
+                orig: None,
+                letter: 'U',
+                stat: DiffStat::default(),
+            });
             continue;
         }
         if x == '!' {
             continue; // ignored file
         }
         if is_conflict(x, y) {
-            status.unstaged.push(FileEntry { path, orig, letter: '!' });
+            status.unstaged.push(FileEntry {
+                path,
+                orig,
+                letter: '!',
+                stat: DiffStat::default(),
+            });
             continue;
         }
         if x != ' ' {
@@ -311,10 +620,16 @@ pub fn parse_status(raw: &str) -> Status {
                 path: path.clone(),
                 orig: orig.clone(),
                 letter: display_letter(x),
+                stat: DiffStat::default(),
             });
         }
         if y != ' ' {
-            status.unstaged.push(FileEntry { path, orig, letter: display_letter(y) });
+            status.unstaged.push(FileEntry {
+                path,
+                orig,
+                letter: display_letter(y),
+                stat: DiffStat::default(),
+            });
         }
     }
     status
@@ -396,7 +711,93 @@ mod tests {
     use super::*;
 
     fn entry(path: &str, letter: char, orig: Option<&str>) -> FileEntry {
-        FileEntry { path: path.to_string(), orig: orig.map(str::to_string), letter }
+        FileEntry {
+            path: path.to_string(),
+            orig: orig.map(str::to_string),
+            letter,
+            stat: DiffStat::default(),
+        }
+    }
+
+    #[test]
+    fn parses_numstat_regular_rename_and_binary_rows() {
+        let stats = parse_numstat("3\t2\tsrc/a.rs\0\n1\t0\t\0old.rs\0new.rs\0-\t-\tlogo.png\0");
+        assert_eq!(stats["src/a.rs"], DiffStat { added: Some(3), deleted: Some(2) });
+        assert_eq!(stats["new.rs"], DiffStat { added: Some(1), deleted: Some(0) });
+        assert_eq!(stats["logo.png"], DiffStat::default());
+    }
+
+    #[test]
+    fn parses_file_history_with_rename_paths_and_first_parent() {
+        let raw = "\x1eabcdef0123456789\0parent second\0move file\0\0\nR100\0old.rs\0src/new.rs\0";
+        let history = parse_file_history(raw);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].line, "abcdef0 move file");
+        assert_eq!(history[0].file.entry.path, "src/new.rs");
+        assert_eq!(history[0].file.entry.orig.as_deref(), Some("old.rs"));
+        assert_eq!(history[0].file.old_spec, "parent");
+    }
+
+    #[test]
+    fn historical_files_use_real_git_rename_stats_and_follow_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "aa-git-history-files-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        run_in(&root, &["init", "-q"]).unwrap();
+        run_in(&root, &["config", "user.name", "Test"]).unwrap();
+        run_in(&root, &["config", "user.email", "test@example.com"]).unwrap();
+        std::fs::write(root.join("src/old.txt"), "one\ntwo\n").unwrap();
+        run_in(&root, &["add", "."]).unwrap();
+        run_in(&root, &["commit", "-qm", "first"]).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        run_in(&root, &["mv", "src/old.txt", "lib/new.txt"]).unwrap();
+        std::fs::write(root.join("lib/new.txt"), "one\ntwo\nthree\n").unwrap();
+        run_in(&root, &["commit", "-qam", "rename"]).unwrap();
+
+        let git = Git { root: root.clone() };
+        let files = git.ref_files("HEAD").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].entry.path, "lib/new.txt");
+        assert_eq!(files[0].entry.orig.as_deref(), Some("src/old.txt"));
+        assert_eq!(files[0].entry.letter, 'R');
+        assert_eq!(files[0].entry.stat, DiffStat { added: Some(1), deleted: Some(0) });
+
+        let history = git.file_history("lib/new.txt", 10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].file.entry.path, "lib/new.txt");
+        assert_eq!(history[0].file.entry.orig.as_deref(), Some("src/old.txt"));
+        assert_eq!(history[1].file.entry.path, "src/old.txt");
+        assert_eq!(history[1].file.old_spec, EMPTY_TREE);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stash_files_include_tracked_and_saved_untracked_snapshots() {
+        let root = std::env::temp_dir().join(format!(
+            "aa-git-stash-files-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        run_in(&root, &["init", "-q"]).unwrap();
+        run_in(&root, &["config", "user.name", "Test"]).unwrap();
+        run_in(&root, &["config", "user.email", "test@example.com"]).unwrap();
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        run_in(&root, &["add", "."]).unwrap();
+        run_in(&root, &["commit", "-qm", "base"]).unwrap();
+        std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("new.txt"), "new\nfile\n").unwrap();
+        run_in(&root, &["stash", "push", "-u", "-m", "test"]).unwrap();
+
+        let files = Git { root: root.clone() }.stash_files("stash@{0}").unwrap();
+        let tracked = files.iter().find(|file| file.entry.path == "tracked.txt").unwrap();
+        assert_eq!(tracked.entry.stat, DiffStat { added: Some(1), deleted: Some(0) });
+        let untracked = files.iter().find(|file| file.entry.path == "new.txt").unwrap();
+        assert_eq!(untracked.entry.stat, DiffStat { added: Some(2), deleted: Some(0) });
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -489,7 +890,9 @@ mod tests {
         assert!(git.unstage_all().is_ok());
         let status = git.status().unwrap();
         assert_eq!(status.staged, vec![]);
-        assert_eq!(status.unstaged, vec![entry("file.txt", 'U', None)]);
+        let mut expected = entry("file.txt", 'U', None);
+        expected.stat = DiffStat { added: Some(1), deleted: Some(0) };
+        assert_eq!(status.unstaged, vec![expected]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -9,6 +9,7 @@
 //! When herdr-aa-filetree is also installed, the panel can merge with it into
 //! a single "Sidebar" pane with an activity-bar view switcher (see sidebar.rs).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -21,9 +22,10 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 
-use herdr_sidebar::git::{FileEntry, Git, Status};
+use herdr_sidebar::change_tree::{Row as ChangeTreeRow, Tree as ChangeTree};
+use herdr_sidebar::git::{DiffStat, FileEntry, Git, RefFile, Status};
 use herdr_sidebar::icons::{IconTheme, icon};
-use herdr_sidebar::state::{self as sidebar, View};
+use herdr_sidebar::state::{self as sidebar, ScmFileView, View};
 use herdr_sidebar::state::Exit;
 use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
@@ -50,6 +52,7 @@ const HOVER_BG: Color = Color::Rgb(48, 52, 60);
 
 /// How many log lines the history-ish drawers fetch.
 const DRAWER_LIMIT: usize = 30;
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(450);
 
 fn letter_color(letter: char) -> Color {
     match letter {
@@ -111,6 +114,10 @@ impl Drawer {
     fn index(self) -> usize {
         Drawer::ALL.iter().position(|d| *d == self).unwrap_or(0)
     }
+
+    fn supports_file_tree(self) -> bool {
+        matches!(self, Self::Commits | Self::Branches | Self::Stashes | Self::Tags)
+    }
 }
 
 #[derive(Default)]
@@ -119,6 +126,8 @@ struct DrawerPanel {
     lines: Vec<String>,
     /// What each line points at, parallel to `lines`.
     refs: Vec<DrawerRef>,
+    /// FILE HISTORY carries the historical path/revision for direct modern diffs.
+    files: Vec<Option<RefFile>>,
 }
 
 /// What a drawer line points at, for clicks and context menus.
@@ -254,6 +263,12 @@ struct Repo {
     collapsed: bool,
     staged_collapsed: bool,
     changes_collapsed: bool,
+    staged_tree: ChangeTree,
+    changes_tree: ChangeTree,
+    staged_rows: Vec<ChangeTreeRow>,
+    changes_rows: Vec<ChangeTreeRow>,
+    staged_dirs: BTreeSet<String>,
+    changes_dirs: BTreeSet<String>,
     message: Vec<char>,
     cursor: usize,
 }
@@ -267,6 +282,12 @@ impl Repo {
             collapsed: false,
             staged_collapsed: false,
             changes_collapsed: false,
+            staged_tree: ChangeTree::default(),
+            changes_tree: ChangeTree::default(),
+            staged_rows: Vec::new(),
+            changes_rows: Vec::new(),
+            staged_dirs: BTreeSet::new(),
+            changes_dirs: BTreeSet::new(),
             message: Vec::new(),
             cursor: 0,
         }
@@ -281,10 +302,76 @@ impl Repo {
         };
         format!("{}{dirty}", self.status.branch)
     }
+
+    fn rebuild_file_rows(&mut self, view: ScmFileView) {
+        self.staged_tree = ChangeTree::new(
+            self.status.staged.iter().enumerate().map(|(i, entry)| (i, entry.path.as_str())),
+        );
+        self.changes_tree = ChangeTree::new(
+            self.status.unstaged.iter().enumerate().map(|(i, entry)| (i, entry.path.as_str())),
+        );
+        self.staged_rows = visible_change_rows(
+            view,
+            &self.staged_tree,
+            &self.staged_dirs,
+            self.status.staged.len(),
+        );
+        self.changes_rows = visible_change_rows(
+            view,
+            &self.changes_tree,
+            &self.changes_dirs,
+            self.status.unstaged.len(),
+        );
+    }
+}
+
+fn visible_change_rows(
+    view: ScmFileView,
+    tree: &ChangeTree,
+    collapsed: &BTreeSet<String>,
+    len: usize,
+) -> Vec<ChangeTreeRow> {
+    match view {
+        ScmFileView::Tree => tree.rows(collapsed),
+        ScmFileView::List => {
+            (0..len).map(|index| ChangeTreeRow::File { index, depth: 0 }).collect()
+        }
+    }
+}
+
+struct ExpandedRef {
+    kind: Drawer,
+    target: DrawerRef,
+    files: Vec<RefFile>,
+    tree: ChangeTree,
+    rows: Vec<ChangeTreeRow>,
+    collapsed: BTreeSet<String>,
+    error: Option<String>,
+}
+
+impl ExpandedRef {
+    fn new(kind: Drawer, target: DrawerRef, files: Vec<RefFile>, error: Option<String>) -> Self {
+        let tree = ChangeTree::new(
+            files.iter().enumerate().map(|(i, file)| (i, file.entry.path.as_str())),
+        );
+        Self {
+            kind,
+            target,
+            files,
+            tree,
+            rows: Vec::new(),
+            collapsed: BTreeSet::new(),
+            error,
+        }
+    }
+
+    fn rebuild_rows(&mut self, view: ScmFileView) {
+        self.rows = visible_change_rows(view, &self.tree, &self.collapsed, self.files.len());
+    }
 }
 
 /// List rows; the first index on the repo-scoped variants is the repo.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Row {
     /// Only rendered when more than one repository is visible.
     RepoHeader(usize),
@@ -298,6 +385,65 @@ enum Row {
     Unstaged(usize, usize),
     DrawerHeader(Drawer),
     DrawerLine(Drawer, usize),
+    HistoryTree(usize),
+    HistoryNotice,
+}
+
+fn tree_nav_target(
+    row: &ChangeTreeRow,
+    rows: &[ChangeTreeRow],
+    index: usize,
+    expand: bool,
+) -> Option<usize> {
+    let depth = row.depth();
+    if expand {
+        return row.expanded().is_some_and(|expanded| expanded).then(|| index + 1).filter(
+            |next| rows.get(*next).is_some_and(|candidate| candidate.depth() > depth),
+        );
+    }
+    if row.expanded().is_some_and(|expanded| expanded) {
+        return None;
+    }
+    rows[..index].iter().rposition(|candidate| candidate.depth() < depth)
+}
+
+fn same_row(left: Row, right: Row) -> bool {
+    left == right
+}
+
+fn change_tree_chevron_hit(x: u16, row: Option<&ChangeTreeRow>) -> bool {
+    change_tree_chevron_hit_at(x, row, 0)
+}
+
+fn change_tree_chevron_hit_at(x: u16, row: Option<&ChangeTreeRow>, base_indent: usize) -> bool {
+    matches!(
+        row,
+        Some(ChangeTreeRow::Directory { depth, .. })
+            if x == (1 + base_indent) as u16
+                + (*depth as u16).saturating_mul(2)
+    )
+}
+
+fn change_tail_width(action_slot: bool) -> usize {
+    usize::from(action_slot) * 3 + 2
+}
+
+fn change_action_hit(x: u16, width: u16) -> bool {
+    let start = width.saturating_sub(change_tail_width(true) as u16);
+    x >= start && x < start.saturating_add(3)
+}
+
+fn toggle_collapsed_path(collapsed: &mut BTreeSet<String>, path: &str, was_expanded: bool) {
+    if was_expanded {
+        collapsed.insert(path.to_string());
+    } else {
+        collapsed.retain(|candidate| {
+            candidate != path
+                && !path
+                    .strip_prefix(candidate.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        });
+    }
 }
 
 impl Row {
@@ -311,14 +457,17 @@ impl Row {
             | Row::ChangesHeader(r)
             | Row::Staged(r, _)
             | Row::Unstaged(r, _) => Some(r),
-            Row::DrawerHeader(_) | Row::DrawerLine(..) => None,
+            Row::DrawerHeader(_)
+            | Row::DrawerLine(..)
+            | Row::HistoryTree(_)
+            | Row::HistoryNotice => None,
         }
     }
 
     /// Keyboard navigation (j/k, wheel) skips widget rows — they are clicked,
     /// like VS Code's inputs, not list entries.
     fn selectable(self) -> bool {
-        !matches!(self, Row::Message(_) | Row::Commit(_))
+        !matches!(self, Row::Message(_) | Row::Commit(_) | Row::HistoryNotice)
     }
 }
 
@@ -333,6 +482,16 @@ enum MenuTarget {
     Drawer {
         kind: Drawer,
         index: usize,
+    },
+    Directory {
+        repo: usize,
+        path: String,
+        staged: bool,
+        entries: Vec<FileEntry>,
+    },
+    HistoryFile {
+        repo: usize,
+        file: RefFile,
     },
 }
 
@@ -407,6 +566,7 @@ enum Setting {
     UnifiedSidebar,
     IconTheme,
     DiffTheme,
+    ScmView,
     AutoOpen,
     Hotkeys,
     Folder,
@@ -514,6 +674,8 @@ pub struct App {
     focus: Focus,
     theme: IconTheme,
     drawers: [DrawerPanel; 8],
+    /// One expanded commit/branch/stash/tag file collection across all drawers.
+    expanded_ref: Option<ExpandedRef>,
     /// The file the FILE HISTORY drawer follows: the last selected file row.
     history_target: Option<String>,
     /// One-shot footer notice: (text, is_error). Cleared on the next key press.
@@ -534,6 +696,7 @@ pub struct App {
     last_mouse: Option<std::time::Instant>,
     /// Last known mouse position, for the button hover highlight.
     mouse_pos: Option<(u16, u16)>,
+    last_click: Option<(usize, std::time::Instant)>,
     page: usize,
     last_width: u16,
     last_height: u16,
@@ -583,6 +746,7 @@ impl App {
             focus: Focus::List,
             theme,
             drawers: Default::default(),
+            expanded_ref: None,
             history_target: None,
             flash: None,
             suggesting: None,
@@ -594,6 +758,7 @@ impl App {
             title_zones: Vec::new(),
             last_mouse: None,
             mouse_pos: None,
+            last_click: None,
             page: 20,
             last_width: 40,
             last_height: 24,
@@ -615,6 +780,91 @@ impl App {
     fn active_repo_mut(&mut self) -> Option<&mut Repo> {
         let i = self.active;
         self.repos.get_mut(i)
+    }
+
+    fn status_tree_row(&self, repo: usize, row: usize, staged: bool) -> Option<&ChangeTreeRow> {
+        let repo = self.repos.get(repo)?;
+        if staged { repo.staged_rows.get(row) } else { repo.changes_rows.get(row) }
+    }
+
+    fn status_entry(&self, repo: usize, row: usize, staged: bool) -> Option<&FileEntry> {
+        let index = match self.status_tree_row(repo, row, staged)? {
+            ChangeTreeRow::File { index, .. } => *index,
+            ChangeTreeRow::Directory { .. } => return None,
+        };
+        let repo = self.repos.get(repo)?;
+        if staged { repo.status.staged.get(index) } else { repo.status.unstaged.get(index) }
+    }
+
+    fn hovered_change_tooltip(&self) -> Option<ChangeTooltip> {
+        let row = *self.rows.get(self.hovered?)?;
+        match row {
+            Row::Staged(repo, row) => {
+                let repo = self.repos.get(repo)?;
+                let tree_row = repo.staged_rows.get(row)?;
+                let entry = match tree_row {
+                    ChangeTreeRow::File { index, .. } => repo.status.staged.get(*index),
+                    ChangeTreeRow::Directory { .. } => None,
+                };
+                change_tree_tooltip(tree_row, entry, repo.status.staged.iter())
+            }
+            Row::Unstaged(repo, row) => {
+                let repo = self.repos.get(repo)?;
+                let tree_row = repo.changes_rows.get(row)?;
+                let entry = match tree_row {
+                    ChangeTreeRow::File { index, .. } => repo.status.unstaged.get(*index),
+                    ChangeTreeRow::Directory { .. } => None,
+                };
+                change_tree_tooltip(tree_row, entry, repo.status.unstaged.iter())
+            }
+            Row::HistoryTree(row) => {
+                let expanded = self.expanded_ref.as_ref()?;
+                let tree_row = expanded.rows.get(row)?;
+                let entry = match tree_row {
+                    ChangeTreeRow::File { index, .. } => {
+                        expanded.files.get(*index).map(|file| &file.entry)
+                    }
+                    ChangeTreeRow::Directory { .. } => None,
+                };
+                change_tree_tooltip(
+                    tree_row,
+                    entry,
+                    expanded.files.iter().map(|file| &file.entry),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn status_directory(&self, repo: usize, row: usize, staged: bool) -> Option<&str> {
+        match self.status_tree_row(repo, row, staged)? {
+            ChangeTreeRow::Directory { path, .. } => Some(path),
+            ChangeTreeRow::File { .. } => None,
+        }
+    }
+
+    fn status_row_path(&self, repo: usize, row: usize, staged: bool) -> Option<&str> {
+        match self.status_tree_row(repo, row, staged)? {
+            ChangeTreeRow::Directory { path, .. } => Some(path),
+            ChangeTreeRow::File { index, .. } => {
+                let repo = self.repos.get(repo)?;
+                if staged {
+                    repo.status.staged.get(*index).map(|entry| entry.path.as_str())
+                } else {
+                    repo.status.unstaged.get(*index).map(|entry| entry.path.as_str())
+                }
+            }
+        }
+    }
+
+    fn entries_in_directory(&self, repo: usize, path: &str, staged: bool) -> Vec<FileEntry> {
+        let Some(repo) = self.repos.get(repo) else { return Vec::new() };
+        let entries = if staged { &repo.status.staged } else { &repo.status.unstaged };
+        entries
+            .iter()
+            .filter(|entry| entry.path.strip_prefix(path).is_some_and(|rest| rest.starts_with('/')))
+            .cloned()
+            .collect()
     }
 
     /// More than one repo: VS Code-style per-repo inline inputs in the list.
@@ -660,10 +910,14 @@ impl App {
     /// tick() calls it every [`crate::REFRESH_EVERY`]); keeps the flash so
     /// periodic ticks don't eat notices.
     pub fn refresh(&mut self) {
+        self.sidebar_state.scm_file_view = sidebar::load_state().scm_file_view;
         let mut error = None;
         for repo in &mut self.repos {
             match repo.git.status() {
-                Ok(status) => repo.status = status,
+                Ok(status) => {
+                    repo.status = status;
+                    repo.rebuild_file_rows(self.sidebar_state.scm_file_view);
+                }
                 Err(e) => error = Some(e),
             }
         }
@@ -744,10 +998,13 @@ impl App {
             }
             repo.staged_collapsed = true;
             repo.changes_collapsed = true;
+            repo.staged_tree.collapse_all(&mut repo.staged_dirs);
+            repo.changes_tree.collapse_all(&mut repo.changes_dirs);
         }
         for drawer in &mut self.drawers {
             drawer.expanded = false;
         }
+        self.expanded_ref = None;
         self.scroll = 0;
         self.rebuild();
     }
@@ -759,32 +1016,61 @@ impl App {
             if !self.drawers[kind.index()].expanded {
                 continue;
             }
+            let panel = &mut self.drawers[kind.index()];
+            panel.files.clear();
+            if kind == Drawer::FileHistory {
+                match &self.history_target {
+                    Some(path) => match git.file_history(path, DRAWER_LIMIT) {
+                        Ok(entries) if entries.is_empty() => {
+                            panel.lines = vec!["(none)".to_string()];
+                            panel.refs = vec![DrawerRef::None];
+                            panel.files = vec![None];
+                        }
+                        Ok(entries) => {
+                            panel.lines = entries.iter().map(|entry| entry.line.clone()).collect();
+                            panel.refs = entries
+                                .iter()
+                                .map(|entry| DrawerRef::Commit(entry.file.new_spec.clone()))
+                                .collect();
+                            panel.files = entries.into_iter().map(|entry| Some(entry.file)).collect();
+                        }
+                        Err(e) => {
+                            panel.lines = vec![format!("({e})")];
+                            panel.refs = vec![DrawerRef::None];
+                            panel.files = vec![None];
+                        }
+                    },
+                    None => {
+                        panel.lines = vec!["(select a file above)".to_string()];
+                        panel.refs = vec![DrawerRef::None];
+                        panel.files = vec![None];
+                    }
+                }
+                continue;
+            }
             let lines = match kind {
                 Drawer::Graph => git.graph(DRAWER_LIMIT),
                 Drawer::Commits => git.commits(DRAWER_LIMIT),
-                Drawer::FileHistory => match &self.history_target {
-                    Some(path) => git.file_history(path, DRAWER_LIMIT),
-                    None => Ok(vec!["(select a file above)".to_string()]),
-                },
                 Drawer::Branches => git.branches(),
                 Drawer::Worktrees => git.worktrees(),
                 Drawer::Remotes => git.remotes(),
                 Drawer::Stashes => git.stashes(),
                 Drawer::Tags => git.tags(),
+                Drawer::FileHistory => unreachable!(),
             };
-            self.drawers[kind.index()].lines = match lines {
+            panel.lines = match lines {
                 Ok(lines) if lines.is_empty() => vec!["(none)".to_string()],
                 Ok(lines) => lines,
                 Err(e) => vec![format!("({e})")],
             };
-            let panel = &mut self.drawers[kind.index()];
-            panel.refs = panel.lines.iter().map(|l| parse_drawer_ref(kind, l)).collect();
+            panel.refs = panel.lines.iter().map(|line| parse_drawer_ref(kind, line)).collect();
+            panel.files.resize(panel.lines.len(), None);
             match kind {
                 Drawer::Worktrees => {
-                    panel.lines = panel.lines.iter().map(|l| pretty_worktree_line(l)).collect();
+                    panel.lines = panel.lines.iter().map(|line| pretty_worktree_line(line)).collect();
                 }
                 Drawer::Remotes => {
-                    panel.lines = panel.lines.iter().map(|l| pretty_remote_line(l)).collect();
+                    panel.lines = panel.lines.iter().map(|line| pretty_remote_line(line)).collect();
                 }
                 _ => {}
             }
@@ -794,6 +1080,12 @@ impl App {
     fn rebuild(&mut self) {
         self.hovered = None;
         self.rows.clear();
+        for repo in &mut self.repos {
+            repo.rebuild_file_rows(self.sidebar_state.scm_file_view);
+        }
+        if let Some(expanded) = &mut self.expanded_ref {
+            expanded.rebuild_rows(self.sidebar_state.scm_file_view);
+        }
         let multi = self.repos.len() > 1;
         for (r, repo) in self.repos.iter().enumerate() {
             if multi {
@@ -810,14 +1102,14 @@ impl App {
             if !repo.status.staged.is_empty() {
                 self.rows.push(Row::StagedHeader(r));
                 if !repo.staged_collapsed {
-                    for i in 0..repo.status.staged.len() {
+                    for i in 0..repo.staged_rows.len() {
                         self.rows.push(Row::Staged(r, i));
                     }
                 }
             }
             self.rows.push(Row::ChangesHeader(r));
             if !repo.changes_collapsed {
-                for i in 0..repo.status.unstaged.len() {
+                for i in 0..repo.changes_rows.len() {
                     self.rows.push(Row::Unstaged(r, i));
                 }
             }
@@ -827,6 +1119,20 @@ impl App {
             if self.drawers[kind.index()].expanded {
                 for i in 0..self.drawers[kind.index()].lines.len() {
                     self.rows.push(Row::DrawerLine(kind, i));
+                    let is_expanded = self.expanded_ref.as_ref().is_some_and(|expanded| {
+                        expanded.kind == kind
+                            && self.drawers[kind.index()].refs.get(i) == Some(&expanded.target)
+                    });
+                    if is_expanded {
+                        let expanded = self.expanded_ref.as_ref().expect("checked above");
+                        if expanded.error.is_some() || expanded.files.is_empty() {
+                            self.rows.push(Row::HistoryNotice);
+                        } else {
+                            for row in 0..expanded.rows.len() {
+                                self.rows.push(Row::HistoryTree(row));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -863,9 +1169,7 @@ impl App {
             && r != self.active
             && r < self.repos.len()
         {
-            self.active = r;
-            self.history_target = None;
-            self.reload_expanded_drawers();
+            self.set_active_repo(r);
             let keep = self.selected;
             self.rebuild();
             if let Some(i) = keep {
@@ -874,11 +1178,9 @@ impl App {
             return;
         }
         let path = match selected {
-            Some(Row::Staged(r, i)) if r == self.active => {
-                self.repos[r].status.staged.get(i).map(|e| e.path.clone())
-            }
+            Some(Row::Staged(r, i)) if r == self.active => self.status_entry(r, i, true).map(|e| e.path.clone()),
             Some(Row::Unstaged(r, i)) if r == self.active => {
-                self.repos[r].status.unstaged.get(i).map(|e| e.path.clone())
+                self.status_entry(r, i, false).map(|e| e.path.clone())
             }
             _ => return, // keep the last file while browsing elsewhere
         };
@@ -895,6 +1197,16 @@ impl App {
                 }
             }
         }
+    }
+
+    fn set_active_repo(&mut self, repo: usize) {
+        if repo == self.active || repo >= self.repos.len() {
+            return;
+        }
+        self.active = repo;
+        self.history_target = None;
+        self.expanded_ref = None;
+        self.reload_expanded_drawers();
     }
 
     /// Handle one key press; `Some(exit)` ends the event loop.
@@ -980,6 +1292,8 @@ impl App {
             KeyCode::PageDown => self.move_by(self.page as isize),
             KeyCode::Home | KeyCode::Char('g') => self.select(0),
             KeyCode::End | KeyCode::Char('G') => self.select(self.rows.len().saturating_sub(1)),
+            KeyCode::Left | KeyCode::Char('h') => self.tree_nav(false),
+            KeyCode::Right | KeyCode::Char('l') => self.tree_nav(true),
             KeyCode::Enter | KeyCode::Char(' ') => self.activate(),
             KeyCode::Char('a') => self.stage_all(),
             KeyCode::Char('u') => self.unstage_all(),
@@ -1074,14 +1388,30 @@ impl App {
         }
         if let Some((index, line)) = self.row_hit(y) {
             let _ = line;
+            let now = std::time::Instant::now();
+            let double = self
+                .last_click
+                .take()
+                .is_some_and(|(previous, at)| previous == index && now.duration_since(at) < DOUBLE_CLICK);
+            self.last_click = Some((index, now));
+            let action_visible = self.hovered == Some(index);
             match self.rows[index] {
                 // Clicking a changed file shows its diff, like VS Code —
                 // except on the hover − / + zone, which unstages/stages it.
                 Row::Staged(r, i) => {
                     self.focus = Focus::List;
                     self.select(index);
-                    if let Some(entry) = self.repos[r].status.staged.get(i).cloned() {
-                        if x >= self.last_width.saturating_sub(5) {
+                    if let Some(path) = self.status_directory(r, i, true).map(str::to_string) {
+                        if action_visible && change_action_hit(x, self.last_width) {
+                            let entries = self.entries_in_directory(r, &path, true);
+                            self.run_entries(r, entries, true);
+                        } else if change_tree_chevron_hit(x, self.status_tree_row(r, i, true))
+                            || double
+                        {
+                            self.toggle_status_directory(r, i, true);
+                        }
+                    } else if let Some(entry) = self.status_entry(r, i, true).cloned() {
+                        if action_visible && change_action_hit(x, self.last_width) {
                             if let Err(e) = self.repos[r].git.unstage(&entry) {
                                 self.flash = Some((e, true));
                             }
@@ -1094,8 +1424,17 @@ impl App {
                 Row::Unstaged(r, i) => {
                     self.focus = Focus::List;
                     self.select(index);
-                    if let Some(entry) = self.repos[r].status.unstaged.get(i).cloned() {
-                        if x >= self.last_width.saturating_sub(5) {
+                    if let Some(path) = self.status_directory(r, i, false).map(str::to_string) {
+                        if action_visible && change_action_hit(x, self.last_width) {
+                            let entries = self.entries_in_directory(r, &path, false);
+                            self.run_entries(r, entries, false);
+                        } else if change_tree_chevron_hit(x, self.status_tree_row(r, i, false))
+                            || double
+                        {
+                            self.toggle_status_directory(r, i, false);
+                        }
+                    } else if let Some(entry) = self.status_entry(r, i, false).cloned() {
+                        if action_visible && change_action_hit(x, self.last_width) {
                             if let Err(e) = self.repos[r].git.stage(&entry) {
                                 self.flash = Some((e, true));
                             }
@@ -1107,7 +1446,8 @@ impl App {
                 }
                 // The inline widgets: click focuses/acts without selecting.
                 Row::Message(r) => {
-                    self.active = r;
+                    self.set_active_repo(r);
+                    self.rebuild();
                     // The box's middle line holds the input and the ✧ button.
                     if line == 1 && x >= self.last_width.saturating_sub(4) {
                         self.suggest_message();
@@ -1140,13 +1480,14 @@ impl App {
                 Row::StagedHeader(r) => {
                     self.focus = Focus::List;
                     self.select(index);
-                    if x >= self.last_width.saturating_sub(6) {
+                    if action_visible && x >= self.last_width.saturating_sub(6) {
                         if let Some(repo) = self.repos.get(r)
                             && let Err(e) = repo.git.unstage_all()
                         {
                             self.flash = Some((e, true));
                         }
                         self.refresh();
+                        self.select_nearest_status_row(r, true, "");
                     } else {
                         self.activate();
                     }
@@ -1154,13 +1495,14 @@ impl App {
                 Row::ChangesHeader(r) => {
                     self.focus = Focus::List;
                     self.select(index);
-                    if x >= self.last_width.saturating_sub(6) {
+                    if action_visible && x >= self.last_width.saturating_sub(6) {
                         if let Some(repo) = self.repos.get(r)
                             && let Err(e) = repo.git.stage_all()
                         {
                             self.flash = Some((e, true));
                         }
                         self.refresh();
+                        self.select_nearest_status_row(r, false, "");
                     } else {
                         self.activate();
                     }
@@ -1175,6 +1517,25 @@ impl App {
                     self.select(index);
                     self.open_drawer_ref(kind, i);
                 }
+                Row::HistoryTree(i) => {
+                    self.focus = Focus::List;
+                    self.select(index);
+                    match self.expanded_ref.as_ref().and_then(|expanded| expanded.rows.get(i)) {
+                        Some(ChangeTreeRow::Directory { .. }) => {
+                            if change_tree_chevron_hit_at(
+                                x,
+                                self.expanded_ref.as_ref().and_then(|e| e.rows.get(i)),
+                                4,
+                            ) || double
+                            {
+                                self.toggle_history_directory(i);
+                            }
+                        }
+                        Some(ChangeTreeRow::File { index, .. }) => self.open_history_file(*index),
+                        None => {}
+                    }
+                }
+                Row::HistoryNotice => {}
             }
         }
         None
@@ -1185,10 +1546,52 @@ impl App {
         let Some(index) = self.row_at(y) else { return };
         self.select(index);
         let (repo, entry, staged) = match self.rows[index] {
-            Row::Staged(r, i) => (r, self.repos[r].status.staged.get(i), true),
-            Row::Unstaged(r, i) => (r, self.repos[r].status.unstaged.get(i), false),
+            Row::Staged(r, i) => {
+                if let Some(path) = self.status_directory(r, i, true).map(str::to_string) {
+                    self.open_directory_menu(x, y, r, path, true);
+                    return;
+                }
+                (r, self.status_entry(r, i, true), true)
+            }
+            Row::Unstaged(r, i) => {
+                if let Some(path) = self.status_directory(r, i, false).map(str::to_string) {
+                    self.open_directory_menu(x, y, r, path, false);
+                    return;
+                }
+                (r, self.status_entry(r, i, false), false)
+            }
             Row::DrawerLine(kind, i) => {
                 self.open_drawer_menu(x, y, kind, i);
+                return;
+            }
+            Row::HistoryTree(i) => {
+                let Some(ChangeTreeRow::File { index, .. }) = self
+                    .expanded_ref
+                    .as_ref()
+                    .and_then(|expanded| expanded.rows.get(i))
+                else {
+                    return;
+                };
+                let Some(file) = self
+                    .expanded_ref
+                    .as_ref()
+                    .and_then(|expanded| expanded.files.get(*index))
+                    .cloned()
+                else {
+                    return;
+                };
+                self.overlay = Some(Overlay::Menu {
+                    x,
+                    y,
+                    target: MenuTarget::HistoryFile { repo: self.active, file },
+                    entries: vec![
+                        MenuEntry::Action(MenuAction::OpenDiff, "Open Diff"),
+                        MenuEntry::Separator,
+                        MenuEntry::Action(MenuAction::CopyRelativePath, "Copy Relative Path"),
+                    ],
+                    selected: 0,
+                    rect: Rect::default(),
+                });
                 return;
             }
             _ => return, // section headers have no menu
@@ -1223,11 +1626,47 @@ impl App {
         });
     }
 
+    fn open_directory_menu(
+        &mut self,
+        x: u16,
+        y: u16,
+        repo: usize,
+        path: String,
+        staged: bool,
+    ) {
+        let entries_in_dir = self.entries_in_directory(repo, &path, staged);
+        self.overlay = Some(Overlay::Menu {
+            x,
+            y,
+            target: MenuTarget::Directory { repo, path, staged, entries: entries_in_dir },
+            entries: vec![
+                MenuEntry::Action(
+                    MenuAction::StageOrUnstage,
+                    if staged { "Unstage Changes" } else { "Stage Changes" },
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Action(MenuAction::CopyRelativePath, "Copy Relative Path"),
+            ],
+            selected: 0,
+            rect: Rect::default(),
+        });
+    }
+
     /// The context menu for a commit / branch / stash / remote / tag.
     fn open_drawer_menu(&mut self, x: u16, y: u16, kind: Drawer, index: usize) {
         let Some(dref) = self.drawers[kind.index()].refs.get(index) else { return };
-        let entries: Vec<MenuEntry> = match dref {
-            DrawerRef::Commit(_) => vec![
+        let entries: Vec<MenuEntry> = match (kind, dref) {
+            (Drawer::FileHistory, DrawerRef::Commit(_)) => vec![
+                MenuEntry::Action(MenuAction::OpenDiff, "Open File Diff"),
+                MenuEntry::Separator,
+                MenuEntry::Action(MenuAction::Checkout, "Checkout (Detached)"),
+                MenuEntry::Action(MenuAction::CherryPick, "Cherry-Pick"),
+                MenuEntry::Action(MenuAction::Revert, "Revert"),
+                MenuEntry::Action(MenuAction::ResetHere, "Reset Current Branch Here…"),
+                MenuEntry::Separator,
+                MenuEntry::Action(MenuAction::CopyRef, "Copy Hash"),
+            ],
+            (Drawer::Graph, DrawerRef::Commit(_)) => vec![
                 MenuEntry::Action(MenuAction::ShowRef, "Show Changes"),
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::Checkout, "Checkout (Detached)"),
@@ -1237,11 +1676,18 @@ impl App {
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::CopyRef, "Copy Hash"),
             ],
-            DrawerRef::Branch { current: true, .. } => vec![
-                MenuEntry::Action(MenuAction::ShowRef, "Show Tip Commit"),
+            (Drawer::Commits, DrawerRef::Commit(_)) => vec![
+                MenuEntry::Action(MenuAction::Checkout, "Checkout (Detached)"),
+                MenuEntry::Action(MenuAction::CherryPick, "Cherry-Pick"),
+                MenuEntry::Action(MenuAction::Revert, "Revert"),
+                MenuEntry::Action(MenuAction::ResetHere, "Reset Current Branch Here…"),
+                MenuEntry::Separator,
+                MenuEntry::Action(MenuAction::CopyRef, "Copy Hash"),
+            ],
+            (_, DrawerRef::Branch { current: true, .. }) => vec![
                 MenuEntry::Action(MenuAction::CopyRef, "Copy Branch Name"),
             ],
-            DrawerRef::Branch { current: false, .. } => vec![
+            (_, DrawerRef::Branch { current: false, .. }) => vec![
                 MenuEntry::Action(MenuAction::Checkout, "Checkout Branch"),
                 MenuEntry::Action(MenuAction::MergeInto, "Merge into Current Branch"),
                 MenuEntry::Separator,
@@ -1249,33 +1695,30 @@ impl App {
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::CopyRef, "Copy Branch Name"),
             ],
-            DrawerRef::Stash(_) => vec![
-                MenuEntry::Action(MenuAction::ShowRef, "Show Changes"),
-                MenuEntry::Separator,
+            (_, DrawerRef::Stash(_)) => vec![
                 MenuEntry::Action(MenuAction::StashApply, "Apply Stash"),
                 MenuEntry::Action(MenuAction::StashPop, "Pop Stash"),
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::StashDrop, "Drop Stash…"),
             ],
-            DrawerRef::Remote { .. } => vec![
+            (_, DrawerRef::Remote { .. }) => vec![
                 MenuEntry::Action(MenuAction::FetchRemote, "Fetch"),
                 MenuEntry::Action(MenuAction::CopyRef, "Copy URL"),
             ],
-            DrawerRef::Tag(_) => vec![
-                MenuEntry::Action(MenuAction::ShowRef, "Show Changes"),
+            (_, DrawerRef::Tag(_)) => vec![
                 MenuEntry::Action(MenuAction::Checkout, "Checkout Tag"),
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::DeleteTag, "Delete Tag…"),
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::CopyRef, "Copy Tag Name"),
             ],
-            DrawerRef::Worktree(_) => vec![
+            (_, DrawerRef::Worktree(_)) => vec![
                 MenuEntry::Action(MenuAction::Reveal, "Reveal in File Explorer"),
                 MenuEntry::Action(MenuAction::CopyRef, "Copy Path"),
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::RemoveWorktree, "Remove Worktree…"),
             ],
-            DrawerRef::None => return,
+            (_, DrawerRef::None) | (_, DrawerRef::Commit(_)) => return,
         };
         self.overlay = Some(Overlay::Menu {
             x,
@@ -1570,6 +2013,12 @@ impl App {
                 true,
             ),
             (
+                Setting::ScmView,
+                "SCM file view",
+                self.sidebar_state.scm_file_view.label().to_string(),
+                true,
+            ),
+            (
                 Setting::Hotkeys,
                 "Footer hotkeys",
                 if self.show_hotkeys() { "shown" } else { "hidden" }.to_string(),
@@ -1609,6 +2058,11 @@ impl App {
             }
             Setting::IconTheme => self.set_theme(self.theme.toggled()),
             Setting::DiffTheme => self.open_theme_picker(),
+            Setting::ScmView => {
+                self.sidebar_state.scm_file_view = self.sidebar_state.scm_file_view.toggled();
+                sidebar::save_state(self.sidebar_state);
+                self.rebuild();
+            }
             Setting::Hotkeys => {
                 self.sidebar_state.show_hotkeys = !self.sidebar_state.show_hotkeys;
                 sidebar::save_state(self.sidebar_state);
@@ -1747,7 +2201,25 @@ impl App {
                 self.file_menu_action(action, repo, entry, staged)
             }
             MenuTarget::Drawer { kind, index } => self.drawer_menu_action(action, kind, index),
+            MenuTarget::Directory { repo, path, staged, entries } => match action {
+                MenuAction::StageOrUnstage => self.run_entries(repo, entries, staged),
+                MenuAction::CopyRelativePath => self.copy_relative_path(&path),
+                _ => {}
+            },
+            MenuTarget::HistoryFile { repo, file } => match action {
+                MenuAction::OpenDiff => self.open_ref_diff(repo, &file),
+                MenuAction::CopyRelativePath => self.copy_relative_path(&file.entry.path),
+                _ => {}
+            },
         }
+    }
+
+    fn copy_relative_path(&mut self, path: &str) {
+        let text = path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        self.flash = Some(match copy_to_clipboard(&text) {
+            Ok(()) => (format!("copied: {text}"), false),
+            Err(err) => (format!("copy failed: {err}"), true),
+        });
     }
 
     fn file_menu_action(&mut self, action: MenuAction, repo: usize, entry: FileEntry, staged: bool) {
@@ -1808,6 +2280,12 @@ impl App {
             DrawerRef::None => return,
         };
         match action {
+            MenuAction::OpenDiff if kind == Drawer::FileHistory => {
+                if let Some(file) = self.drawers[kind.index()].files.get(index).and_then(Clone::clone)
+                {
+                    self.open_ref_diff(repo, &file);
+                }
+            }
             MenuAction::ShowRef => self.open_drawer_ref(kind, index),
             MenuAction::Reveal => reveal(std::path::Path::new(&spec)),
             MenuAction::RemoveWorktree => self.confirm_git(
@@ -1874,9 +2352,22 @@ impl App {
         self.overlay = Some(Overlay::ConfirmGit { repo, prompt, args });
     }
 
-    /// Click/⏎ on a drawer line: show the commit / stash / tag / branch tip
-    /// in the preview pane (scrollable colored `git show`).
+    /// Graph keeps its raw `git show`; modern history drawers expand a file
+    /// tree, and File History opens the selected historical file directly.
     fn open_drawer_ref(&mut self, kind: Drawer, index: usize) {
+        if kind == Drawer::FileHistory {
+            if let Some(file) = self.drawers[kind.index()].files.get(index).and_then(Clone::clone) {
+                self.open_ref_diff(self.active, &file);
+            }
+            return;
+        }
+        if matches!(kind, Drawer::Commits | Drawer::Branches | Drawer::Stashes | Drawer::Tags) {
+            self.toggle_expanded_ref(kind, index);
+            return;
+        }
+        if kind != Drawer::Graph {
+            return;
+        }
         let Some(pane_id) = self.pane_ctl.as_ref().map(|c| c.pane_id.clone()) else {
             self.flash = Some(("preview needs a herdr pane".into(), true));
             return;
@@ -1884,19 +2375,85 @@ impl App {
         let Some(repo) = self.repos.get(self.active) else { return };
         let spec = match self.drawers[kind.index()].refs.get(index) {
             Some(DrawerRef::Commit(h)) => h.clone(),
-            Some(DrawerRef::Stash(n)) => format!("stash@{{{n}}}"),
-            Some(DrawerRef::Branch { name, .. }) => name.clone(),
-            Some(DrawerRef::Tag(t)) => t.clone(),
             _ => return,
         };
-        let path = (kind == Drawer::FileHistory)
-            .then(|| self.history_target.clone())
-            .flatten();
-        let payload =
-            herdr_sidebar::viewer::show_request(repo.git.root(), &spec, path.as_deref());
+        let payload = herdr_sidebar::viewer::show_request(repo.git.root(), &spec, None);
         if let Err(e) =
             herdr_sidebar::viewer::open_in_pane(&pane_id, repo.git.root(), &payload)
         {
+            self.flash = Some((e, true));
+        }
+    }
+
+    fn toggle_expanded_ref(&mut self, kind: Drawer, index: usize) {
+        let Some(target) = self.drawers[kind.index()].refs.get(index).cloned() else { return };
+        if self
+            .expanded_ref
+            .as_ref()
+            .is_some_and(|expanded| expanded.kind == kind && expanded.target == target)
+        {
+            self.expanded_ref = None;
+            self.rebuild();
+            self.select_drawer_line(kind, index);
+            return;
+        }
+        let Some(repo) = self.active_repo() else { return };
+        let result = match &target {
+            DrawerRef::Commit(spec) | DrawerRef::Tag(spec) => repo.git.ref_files(spec),
+            DrawerRef::Branch { name, .. } => repo.git.ref_files(name),
+            DrawerRef::Stash(index) => repo.git.stash_files(&format!("stash@{{{index}}}")),
+            _ => return,
+        };
+        let (files, error) = match result {
+            Ok(files) => (files, None),
+            Err(_) if kind == Drawer::Tags => {
+                (Vec::new(), Some("tag does not point to a commit".to_string()))
+            }
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        let mut expanded = ExpandedRef::new(kind, target, files, error);
+        expanded.rebuild_rows(self.sidebar_state.scm_file_view);
+        self.expanded_ref = Some(expanded);
+        self.rebuild();
+        self.select_drawer_line(kind, index);
+    }
+
+    fn select_drawer_line(&mut self, kind: Drawer, index: usize) {
+        if let Some(row) = self
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::DrawerLine(k, i) if *k == kind && *i == index))
+        {
+            self.select(row);
+        }
+    }
+
+    fn open_history_file(&mut self, index: usize) {
+        let Some(file) = self
+            .expanded_ref
+            .as_ref()
+            .and_then(|expanded| expanded.files.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.open_ref_diff(self.active, &file);
+    }
+
+    fn open_ref_diff(&mut self, repo: usize, file: &RefFile) {
+        let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
+            self.flash = Some(("diff preview needs a herdr pane".into(), true));
+            return;
+        };
+        let Some(repo) = self.repos.get(repo) else { return };
+        let payload = herdr_sidebar::viewer::ref_diff_request(
+            repo.git.root(),
+            &file.old_spec,
+            &file.new_spec,
+            &file.entry.path,
+            file.entry.orig.as_deref(),
+        );
+        if let Err(e) = herdr_sidebar::viewer::open_in_pane(&pane_id, repo.git.root(), &payload) {
             self.flash = Some((e, true));
         }
     }
@@ -1932,13 +2489,22 @@ impl App {
         };
         match row {
             Row::Staged(r, i) => {
-                if let Some(entry) = self.repos[r].status.staged.get(i).cloned() {
+                if let Some(entry) = self.status_entry(r, i, true).cloned() {
                     self.open_diff(r, &entry, true);
                 }
             }
             Row::Unstaged(r, i) => {
-                if let Some(entry) = self.repos[r].status.unstaged.get(i).cloned() {
+                if let Some(entry) = self.status_entry(r, i, false).cloned() {
                     self.open_diff(r, &entry, false);
+                }
+            }
+            Row::HistoryTree(i) => {
+                if let Some(ChangeTreeRow::File { index, .. }) = self
+                    .expanded_ref
+                    .as_ref()
+                    .and_then(|expanded| expanded.rows.get(i))
+                {
+                    self.open_history_file(*index);
                 }
             }
             _ => {}
@@ -2081,6 +2647,12 @@ impl App {
             // Widget rows aren't keyboard-selectable; nothing to activate.
             Row::Message(_) | Row::Commit(_) => {}
             Row::DrawerLine(kind, i) => self.open_drawer_ref(kind, i),
+            Row::HistoryTree(i) => match self.expanded_ref.as_ref().and_then(|expanded| expanded.rows.get(i)) {
+                Some(ChangeTreeRow::Directory { .. }) => self.toggle_history_directory(i),
+                Some(ChangeTreeRow::File { index, .. }) => self.open_history_file(*index),
+                None => {}
+            },
+            Row::HistoryNotice => {}
             Row::RepoHeader(r) => {
                 self.repos[r].collapsed = !self.repos[r].collapsed;
                 self.rebuild();
@@ -2098,8 +2670,20 @@ impl App {
                 self.reload_expanded_drawers();
                 self.rebuild();
             }
-            Row::Staged(r, i) => self.run_op(|git, e| git.unstage(e), r, i, true),
-            Row::Unstaged(r, i) => self.run_op(|git, e| git.stage(e), r, i, false),
+            Row::Staged(r, i) => {
+                if self.status_directory(r, i, true).is_some() {
+                    self.toggle_status_directory(r, i, true);
+                } else {
+                    self.run_op(|git, e| git.unstage(e), r, i, true);
+                }
+            }
+            Row::Unstaged(r, i) => {
+                if self.status_directory(r, i, false).is_some() {
+                    self.toggle_status_directory(r, i, false);
+                } else {
+                    self.run_op(|git, e| git.stage(e), r, i, false);
+                }
+            }
         }
     }
 
@@ -2110,29 +2694,178 @@ impl App {
         index: usize,
         staged: bool,
     ) {
+        let Some(entry) = self.status_entry(repo, index, staged).cloned() else { return };
         let Some(repo) = self.repos.get(repo) else { return };
-        let list = if staged { &repo.status.staged } else { &repo.status.unstaged };
-        let Some(entry) = list.get(index) else { return };
-        if let Err(e) = op(&repo.git, entry) {
+        if let Err(e) = op(&repo.git, &entry) {
             self.flash = Some((e, true));
         }
         self.refresh();
     }
 
+    fn run_entries(&mut self, repo: usize, entries: Vec<FileEntry>, staged: bool) {
+        if entries.is_empty() {
+            return;
+        }
+        let preferred = entries[0].path.clone();
+        let repo_index = repo;
+        let Some(repo) = self.repos.get(repo_index) else { return };
+        let result = if staged {
+            repo.git.unstage_entries(&entries)
+        } else {
+            repo.git.stage_entries(&entries)
+        };
+        if let Err(e) = result {
+            self.flash = Some((e, true));
+        }
+        self.refresh();
+        self.select_nearest_status_row(repo_index, staged, &preferred);
+    }
+
+    fn select_nearest_status_row(&mut self, repo: usize, staged: bool, preferred: &str) {
+        let header = self.rows.iter().position(|row| {
+            matches!(
+                (staged, row),
+                (true, Row::StagedHeader(r)) | (false, Row::ChangesHeader(r)) if *r == repo
+            )
+        }).or_else(|| {
+            staged
+                .then(|| {
+                    self.rows
+                        .iter()
+                        .position(|row| matches!(row, Row::ChangesHeader(r) if *r == repo))
+                })
+                .flatten()
+        });
+        let preferred = preferred.to_lowercase();
+        let mut candidates = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match *row {
+                Row::Staged(r, i) if staged && r == repo => self
+                    .status_row_path(r, i, true)
+                    .map(|path| (index, path.to_string())),
+                Row::Unstaged(r, i) if !staged && r == repo => self
+                    .status_row_path(r, i, false)
+                    .map(|path| (index, path.to_string())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| candidate.1.to_lowercase());
+        let selected = candidates
+            .iter()
+            .find(|(_, path)| path.to_lowercase().as_str() >= preferred.as_str())
+            .or_else(|| candidates.last())
+            .map(|(index, _)| *index)
+            .or(header);
+        if let Some(index) = selected {
+            self.select(index);
+        }
+    }
+
+    fn toggle_status_directory(&mut self, repo: usize, row: usize, staged: bool) {
+        let was_expanded = self
+            .status_tree_row(repo, row, staged)
+            .and_then(ChangeTreeRow::expanded)
+            .unwrap_or(false);
+        let Some(path) = self.status_directory(repo, row, staged).map(str::to_string) else {
+            return;
+        };
+        let Some(repo) = self.repos.get_mut(repo) else { return };
+        let collapsed = if staged { &mut repo.staged_dirs } else { &mut repo.changes_dirs };
+        toggle_collapsed_path(collapsed, &path, was_expanded);
+        self.rebuild();
+    }
+
+    fn toggle_history_directory(&mut self, row: usize) {
+        let Some(expanded) = &mut self.expanded_ref else { return };
+        let Some(ChangeTreeRow::Directory { path, expanded: was_expanded, .. }) = expanded.rows.get(row) else {
+            return;
+        };
+        let path = path.clone();
+        let was_expanded = *was_expanded;
+        toggle_collapsed_path(&mut expanded.collapsed, &path, was_expanded);
+        self.rebuild();
+    }
+
+    fn tree_nav(&mut self, expand: bool) {
+        let Some(selected) = self.selected else { return };
+        let Some(row) = self.rows.get(selected).copied() else { return };
+        match row {
+            Row::Staged(repo, index) => self.status_tree_nav(selected, repo, index, true, expand),
+            Row::Unstaged(repo, index) => {
+                self.status_tree_nav(selected, repo, index, false, expand)
+            }
+            Row::HistoryTree(index) => self.history_tree_nav(selected, index, expand),
+            _ => {}
+        }
+    }
+
+    fn status_tree_nav(
+        &mut self,
+        selected: usize,
+        repo: usize,
+        index: usize,
+        staged: bool,
+        expand: bool,
+    ) {
+        let Some(row) = self.status_tree_row(repo, index, staged).cloned() else { return };
+        let rows = if staged { &self.repos[repo].staged_rows } else { &self.repos[repo].changes_rows };
+        if let Some(target) = tree_nav_target(&row, rows, index, expand) {
+            let wanted =
+                if staged { Row::Staged(repo, target) } else { Row::Unstaged(repo, target) };
+            if let Some(global) = self.rows.iter().position(|row| same_row(*row, wanted)) {
+                self.select(global);
+            } else {
+                self.select(selected);
+            }
+        } else if matches!(row, ChangeTreeRow::Directory { .. }) {
+            let is_expanded = row.expanded().unwrap_or(false);
+            if is_expanded != expand {
+                self.toggle_status_directory(repo, index, staged);
+            }
+        }
+    }
+
+    fn history_tree_nav(&mut self, selected: usize, index: usize, expand: bool) {
+        let Some(expanded) = &self.expanded_ref else { return };
+        let Some(row) = expanded.rows.get(index).cloned() else { return };
+        let target = tree_nav_target(&row, &expanded.rows, index, expand);
+        if let Some(target) = target {
+            if let Some(global) = self
+                .rows
+                .iter()
+                .position(|row| matches!(row, Row::HistoryTree(i) if *i == target))
+            {
+                self.select(global);
+            }
+        } else if matches!(row, ChangeTreeRow::Directory { .. })
+            && row.expanded().unwrap_or(false) != expand
+        {
+            self.toggle_history_directory(index);
+        } else {
+            self.select(selected);
+        }
+    }
+
     fn stage_all(&mut self) {
+        let active = self.active;
         let Some(repo) = self.active_repo() else { return };
         if let Err(e) = repo.git.stage_all() {
             self.flash = Some((e, true));
         }
         self.refresh();
+        self.select_nearest_status_row(active, false, "");
     }
 
     fn unstage_all(&mut self) {
+        let active = self.active;
         let Some(repo) = self.active_repo() else { return };
         if let Err(e) = repo.git.unstage_all() {
             self.flash = Some((e, true));
         }
         self.refresh();
+        self.select_nearest_status_row(active, true, "");
     }
 
     /// Kick off ✧ commit-message generation in the background.
@@ -2594,7 +3327,6 @@ impl App {
     fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
         let width = area.width as usize;
         let theme = self.theme;
-        let hovered = self.hovered;
         let active = self.active;
 
         // Clamp the scroll and (keyboard nav only) walk it forward until the
@@ -2619,6 +3351,14 @@ impl App {
             }
             self.snap = false;
         }
+        self.body = BodyGeom {
+            top: area.y,
+            height: area.height,
+            offset: self.scroll,
+        };
+        // Git refreshes rebuild the row list, but a stationary pointer emits no new Moved event.
+        self.hovered = self.mouse_pos.and_then(|(_, row)| self.row_at(row));
+        let hovered = self.hovered;
         // Visible slice: everything from `scroll` until the viewport is
         // spent (plus one partially-clipped row).
         let mut end = self.scroll;
@@ -2688,20 +3428,85 @@ impl App {
                         item
                     }
                     Row::DrawerLine(kind, i) => {
-                        drawer_line(kind, &self.drawers[kind.index()].lines[i])
+                        let expandable = kind.supports_file_tree()
+                            && matches!(
+                                self.drawers[kind.index()].refs.get(i),
+                                Some(
+                                    DrawerRef::Commit(_)
+                                        | DrawerRef::Branch { .. }
+                                        | DrawerRef::Stash(_)
+                                        | DrawerRef::Tag(_)
+                                )
+                            );
+                        let expanded = self.expanded_ref.as_ref().is_some_and(|expanded| {
+                            expanded.kind == kind
+                                && self.drawers[kind.index()].refs.get(i)
+                                    == Some(&expanded.target)
+                        });
+                        drawer_line(
+                            kind,
+                            &self.drawers[kind.index()].lines[i],
+                            expandable.then_some(expanded),
+                        )
                     }
-                    Row::Staged(r, i) => file_item(
-                        &self.repos[r].status.staged[i],
+                    Row::Staged(r, i) => change_tree_item(
+                        &self.repos[r].staged_rows[i],
+                        match self.repos[r].staged_rows[i] {
+                            ChangeTreeRow::File { index, .. } => {
+                                self.repos[r].status.staged.get(index)
+                            }
+                            ChangeTreeRow::Directory { .. } => None,
+                        },
                         width,
                         theme,
-                        row_hovered.then_some('−'),
+                        ChangeTail::Status(row_hovered.then_some('−')),
+                        self.sidebar_state.scm_file_view == ScmFileView::Tree,
+                        0,
                     ),
-                    Row::Unstaged(r, i) => file_item(
-                        &self.repos[r].status.unstaged[i],
+                    Row::Unstaged(r, i) => change_tree_item(
+                        &self.repos[r].changes_rows[i],
+                        match self.repos[r].changes_rows[i] {
+                            ChangeTreeRow::File { index, .. } => {
+                                self.repos[r].status.unstaged.get(index)
+                            }
+                            ChangeTreeRow::Directory { .. } => None,
+                        },
                         width,
                         theme,
-                        row_hovered.then_some('+'),
+                        ChangeTail::Status(row_hovered.then_some('+')),
+                        self.sidebar_state.scm_file_view == ScmFileView::Tree,
+                        0,
                     ),
+                    Row::HistoryTree(i) => self.expanded_ref.as_ref().map_or_else(
+                        || ListItem::new(""),
+                        |expanded| {
+                            let entry = match expanded.rows[i] {
+                                ChangeTreeRow::File { index, .. } => {
+                                    expanded.files.get(index).map(|file| &file.entry)
+                                }
+                                ChangeTreeRow::Directory { .. } => None,
+                            };
+                            change_tree_item(
+                                &expanded.rows[i],
+                                entry,
+                                width,
+                                theme,
+                                ChangeTail::History,
+                                self.sidebar_state.scm_file_view == ScmFileView::Tree,
+                                4,
+                            )
+                        },
+                    ),
+                    Row::HistoryNotice => ListItem::new(Line::from(Span::styled(
+                        format!(
+                            "   {}",
+                            self.expanded_ref
+                                .as_ref()
+                                .and_then(|expanded| expanded.error.as_deref())
+                                .unwrap_or("No changed files")
+                        ),
+                        Style::default().dim(),
+                    ))),
                 };
                 if selected == Some(i) {
                     let style = if list_focused {
@@ -2719,11 +3524,14 @@ impl App {
             .collect();
         frame.render_widget(List::new(items), area);
         draw_scrollbar(frame, area, self.rows.len(), visible, self.scroll);
-        self.body = BodyGeom {
-            top: area.y,
-            height: area.height,
-            offset: self.scroll,
-        };
+        if self.overlay.is_none()
+            && let Some(index) = hovered
+            && let Some(row_y) = self.row_y(index)
+            && let Some(tooltip) = self.hovered_change_tooltip()
+        {
+            let anchor_x = self.mouse_pos.map_or(area.x, |(x, _)| x);
+            draw_hover_tooltip(frame, area, row_y, anchor_x, tooltip);
+        }
 
         // Terminal cursor inside the focused INLINE message box (multi-repo).
         if self.multi() && self.focus == Focus::Message {
@@ -3091,24 +3899,199 @@ fn file_history_header(collapsed: bool, file: &str) -> ListItem<'static> {
 
 /// One content line inside an expanded drawer. Branch lines highlight the
 /// current branch (git's `%(HEAD)` renders it as `* name`).
-fn drawer_line(kind: Drawer, text: &str) -> ListItem<'static> {
+fn drawer_line(kind: Drawer, text: &str, expanded: Option<bool>) -> ListItem<'static> {
     let style = match kind {
         Drawer::Branches if text.starts_with('*') => {
             Style::default().fg(UNTRACKED).bold()
         }
         _ => Style::default(),
     };
-    ListItem::new(Line::from(Span::styled(format!("   {text}"), style)))
+    let prefix = expanded.map_or_else(
+        || "   ".to_string(),
+        |expanded| format!("   {} ", if expanded { '▾' } else { '▸' }),
+    );
+    ListItem::new(Line::from(Span::styled(format!("{prefix}{text}"), style)))
 }
 
-/// A file row: icon, name colored by status, dimmed parent directory, and a
-/// right-aligned status letter — VS Code Source Control's row anatomy.
-fn file_item(
-    entry: &FileEntry,
+#[derive(Clone, Copy)]
+enum ChangeTail {
+    Status(Option<char>),
+    History,
+}
+
+struct ChangeTooltip {
+    path: String,
+    stat: DiffStat,
+}
+
+fn diff_stat_spans(stat: DiffStat) -> Vec<Span<'static>> {
+    let mut stats = Vec::new();
+    if let Some(added) = stat.added.filter(|count| *count > 0) {
+        stats.push(Span::styled(format!("+{added}"), Style::default().fg(ADDED)));
+    }
+    if let Some(deleted) = stat.deleted.filter(|count| *count > 0) {
+        if !stats.is_empty() {
+            stats.push(Span::raw(" "));
+        }
+        stats.push(Span::styled(format!("-{deleted}"), Style::default().fg(DELETED)));
+    }
+    stats
+}
+
+fn directory_diff_stat<'a>(
+    path: &str,
+    entries: impl Iterator<Item = &'a FileEntry>,
+) -> DiffStat {
+    let prefix = format!("{path}/");
+    let mut added = 0usize;
+    let mut deleted = 0usize;
+    let mut has_added = false;
+    let mut has_deleted = false;
+    for entry in entries.filter(|entry| entry.path.starts_with(&prefix)) {
+        if let Some(count) = entry.stat.added {
+            has_added = true;
+            added = added.saturating_add(count);
+        }
+        if let Some(count) = entry.stat.deleted {
+            has_deleted = true;
+            deleted = deleted.saturating_add(count);
+        }
+    }
+    DiffStat {
+        added: has_added.then_some(added),
+        deleted: has_deleted.then_some(deleted),
+    }
+}
+
+fn change_tree_tooltip<'a>(
+    row: &ChangeTreeRow,
+    entry: Option<&FileEntry>,
+    entries: impl Iterator<Item = &'a FileEntry>,
+) -> Option<ChangeTooltip> {
+    match row {
+        ChangeTreeRow::Directory { path, .. } => Some(ChangeTooltip {
+            path: path.replace('/', std::path::MAIN_SEPARATOR_STR),
+            stat: directory_diff_stat(path, entries),
+        }),
+        ChangeTreeRow::File { .. } => {
+            let entry = entry?;
+            let mut path = entry.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            if let Some(orig) = &entry.orig {
+                path.push_str(" ← ");
+                path.push_str(&orig.replace('/', std::path::MAIN_SEPARATOR_STR));
+            }
+            Some(ChangeTooltip {
+                path,
+                stat: entry.stat,
+            })
+        }
+    }
+}
+
+fn draw_hover_tooltip(
+    frame: &mut Frame,
+    bounds: Rect,
+    row_y: u16,
+    anchor_x: u16,
+    tooltip: ChangeTooltip,
+) {
+    if bounds.width < 14 || bounds.height < 3 {
+        return;
+    }
+    let stats = diff_stat_spans(tooltip.stat);
+    let stats_width = stats.iter().map(Span::width).sum::<usize>();
+    let width = (Span::raw(tooltip.path.as_str()).width().max(stats_width) + 4)
+        .clamp(14, bounds.width as usize) as u16;
+    let mut lines: Vec<Line<'static>> =
+        wrap_footer_message(&tooltip.path, width.saturating_sub(2), 0)
+        .into_iter()
+        .map(Line::from)
+        .collect();
+    let stat_line = if stats.is_empty() {
+        None
+    } else {
+        let mut line = vec![Span::raw(" ")];
+        line.extend(stats);
+        Some(Line::from(line))
+    };
+    let max_lines = bounds.height.saturating_sub(2) as usize;
+    lines.truncate(max_lines.saturating_sub(usize::from(stat_line.is_some())));
+    lines.extend(stat_line);
+    let height = (lines.len() + 2) as u16;
+
+    let right = bounds.x.saturating_add(bounds.width);
+    let bottom = bounds.y.saturating_add(bounds.height);
+    let x = anchor_x
+        .saturating_sub(1)
+        .clamp(bounds.x, right.saturating_sub(width));
+    let below = row_y.saturating_add(1);
+    let y = if below.saturating_add(height) <= bottom {
+        below
+    } else {
+        row_y.saturating_sub(height).max(bounds.y)
+    };
+    let area = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(Color::Rgb(0x25, 0x25, 0x26)).fg(Color::White))
+            .block(Block::bordered().border_style(Style::default().fg(Color::DarkGray))),
+        area,
+    );
+}
+
+fn change_tree_item(
+    row: &ChangeTreeRow,
+    entry: Option<&FileEntry>,
     width: usize,
     theme: IconTheme,
-    action: Option<char>,
+    tail: ChangeTail,
+    tree_mode: bool,
+    base_indent: usize,
 ) -> ListItem<'static> {
+    let (action_slot, action) = match tail {
+        ChangeTail::Status(action) => (true, action),
+        ChangeTail::History => (false, None),
+    };
+    let ChangeTreeRow::File { depth, .. } = row else {
+        let ChangeTreeRow::Directory { name, depth, expanded, .. } = row else {
+            unreachable!()
+        };
+        let dir_icon = icon(theme, name, true, *expanded);
+        let icon_style = dir_icon.rgb.map_or_else(Style::default, |(r, g, b)| {
+            Style::default().fg(Color::Rgb(r, g, b))
+        });
+        let prefix = format!(
+            "{}{} ",
+            " ".repeat(1 + base_indent + depth * 2),
+            if *expanded { '▾' } else { '▸' }
+        );
+        let action_width = if action_slot { 5 } else { 0 };
+        let icon_text = format!("{} ", dir_icon.glyph);
+        let name_width = width
+            .saturating_sub(
+                Span::raw(prefix.as_str()).width()
+                    + Span::raw(icon_text.as_str()).width()
+                    + action_width,
+            )
+            .max(1);
+        let mut spans = vec![
+            Span::raw(prefix),
+            Span::styled(icon_text, icon_style),
+            Span::raw(truncate_to(name.clone(), name_width)),
+        ];
+        let used = spans.iter().map(Span::width).sum::<usize>();
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + action_width).max(1))));
+        if action_slot {
+            spans.push(match action {
+                Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
+                None => Span::raw("   "),
+            });
+            spans.push(Span::raw("  "));
+        }
+        return ListItem::new(Line::from(spans));
+    };
+    let Some(entry) = entry else { return ListItem::new("") };
     let (dir, name) = match entry.path.rsplit_once('/') {
         Some((dir, name)) => (Some(dir), name),
         None => (None, entry.path.as_str()),
@@ -3119,30 +4102,48 @@ fn file_item(
         Some((r, g, b)) => Style::default().fg(Color::Rgb(r, g, b)),
         None => Style::default(),
     };
+    let tail_width = change_tail_width(action_slot);
+    let wanted_indent = if tree_mode {
+        3 + base_indent + depth * 2
+    } else {
+        3 + base_indent
+    };
+    let icon_text = format!("{} ", file_icon.glyph);
+    let icon_width = Span::raw(icon_text.as_str()).width();
+    let left_limit = width.saturating_sub(tail_width + 1);
+    let indent = wanted_indent.min(left_limit.saturating_sub(icon_width));
+    let name_width = left_limit.saturating_sub(indent + icon_width);
     let mut spans = vec![
-        Span::raw("   "),
-        Span::styled(format!("{} ", file_icon.glyph), icon_style),
-        Span::styled(name.to_string(), Style::default().fg(color)),
+        Span::raw(" ".repeat(indent)),
+        Span::styled(icon_text, icon_style),
+        Span::styled(truncate_to(name.to_string(), name_width), Style::default().fg(color)),
     ];
-    // The hovered row shows the stage/unstage glyph beside the letter.
-    let tail = 2 + if action.is_some() { 2 } else { 0 };
-    if let Some(dir) = dir {
+    if !tree_mode && let Some(dir) = dir {
         let sep = std::path::MAIN_SEPARATOR.to_string();
-        // The status letter must survive narrow panes: give the dimmed dir only
-        // the room left after icon + name + letter, ellipsizing like VS Code.
         let used: usize = spans.iter().map(Span::width).sum();
-        let avail = width.saturating_sub(used + 1 + tail);
+        let avail = left_limit.saturating_sub(used);
         let text = truncate_to(format!(" {}", dir.replace('/', &sep)), avail);
         if !text.is_empty() {
             spans.push(Span::styled(text, Style::default().dim()));
         }
     }
-    let letter = Span::styled(entry.letter.to_string(), Style::default().fg(color).bold());
+    if let Some(orig) = &entry.orig {
+        let used: usize = spans.iter().map(Span::width).sum();
+        let avail = left_limit.saturating_sub(used);
+        let text = truncate_to(format!(" ← {}", orig.replace('/', std::path::MAIN_SEPARATOR_STR)), avail);
+        if !text.is_empty() {
+            spans.push(Span::styled(text, Style::default().dim()));
+        }
+    }
     let left_width: usize = spans.iter().map(Span::width).sum();
-    let pad = width.saturating_sub(left_width + tail).max(1);
+    let letter = Span::styled(entry.letter.to_string(), Style::default().fg(color).bold());
+    let pad = width.saturating_sub(left_width + tail_width);
     spans.push(Span::raw(" ".repeat(pad)));
-    if let Some(a) = action {
-        spans.push(Span::styled(format!("{a} "), Style::default().bold()));
+    if action_slot {
+        spans.push(match action {
+            Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
+            None => Span::raw("   "),
+        });
     }
     spans.push(letter);
     spans.push(Span::raw(" "));
@@ -3248,6 +4249,67 @@ mod tests {
                 "Tags"
             ]
         );
+    }
+
+    #[test]
+    fn modern_history_drawers_are_explicit() {
+        assert!(Drawer::Commits.supports_file_tree());
+        assert!(Drawer::Branches.supports_file_tree());
+        assert!(Drawer::Stashes.supports_file_tree());
+        assert!(Drawer::Tags.supports_file_tree());
+        assert!(!Drawer::Graph.supports_file_tree());
+        assert!(!Drawer::FileHistory.supports_file_tree());
+    }
+
+    #[test]
+    fn change_action_has_a_stable_three_column_hit_zone() {
+        assert!(!change_action_hit(34, 40));
+        assert!(change_action_hit(35, 40));
+        assert!(change_action_hit(37, 40));
+        assert!(!change_action_hit(38, 40));
+    }
+
+    #[test]
+    fn every_change_row_offers_the_full_path_and_stats_tooltip() {
+        let entry = FileEntry {
+            path: "plugins/herdr-sidebar/src/a_very_long_filename.rs".into(),
+            orig: None,
+            letter: 'M',
+            stat: herdr_sidebar::git::DiffStat {
+                added: Some(417),
+                deleted: Some(14),
+            },
+        };
+        let row = ChangeTreeRow::File { index: 0, depth: 0 };
+        let tooltip = change_tree_tooltip(&row, Some(&entry), std::iter::once(&entry)).unwrap();
+        assert_eq!(tooltip.path, entry.path);
+        assert_eq!(tooltip.stat, entry.stat);
+
+        let other = FileEntry {
+            path: "README.md".into(),
+            orig: None,
+            letter: 'M',
+            stat: DiffStat { added: Some(3), deleted: None },
+        };
+        let directory = ChangeTreeRow::Directory {
+            path: "plugins/herdr-sidebar".into(),
+            name: "plugins/herdr-sidebar".into(),
+            depth: 0,
+            expanded: true,
+        };
+        let entries = [&entry, &other];
+        let tooltip = change_tree_tooltip(&directory, None, entries.into_iter()).unwrap();
+        assert_eq!(tooltip.path, "plugins/herdr-sidebar");
+        assert_eq!(tooltip.stat, entry.stat);
+    }
+
+    #[test]
+    fn expanding_a_compacted_path_clears_collapsed_ancestors() {
+        let mut collapsed = BTreeSet::from(["src".to_string(), "other".to_string()]);
+        toggle_collapsed_path(&mut collapsed, "src/components", false);
+        assert_eq!(collapsed, BTreeSet::from(["other".to_string()]));
+        toggle_collapsed_path(&mut collapsed, "src/components", true);
+        assert!(collapsed.contains("src/components"));
     }
 
 }

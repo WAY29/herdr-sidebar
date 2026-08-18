@@ -103,6 +103,43 @@ impl View {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScmFileView {
+    Tree,
+    List,
+}
+
+impl ScmFileView {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Tree => Self::List,
+            Self::List => Self::Tree,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tree => "Tree",
+            Self::List => "List",
+        }
+    }
+
+    fn state_name(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::List => "list",
+        }
+    }
+
+    fn from_state_name(name: &str) -> Option<Self> {
+        match name {
+            "tree" => Some(Self::Tree),
+            "list" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
 /// The sticky sidebar setting, shared by both plugins.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct State {
@@ -117,6 +154,8 @@ pub struct State {
     pub icons: Option<crate::icons::IconTheme>,
     /// Syntax colors used by file previews and SCM diffs.
     pub diff_theme: crate::syntax::DiffTheme,
+    /// How changed and historical file collections are laid out in Source Control.
+    pub scm_file_view: ScmFileView,
     /// The first-run "install a Nerd Font?" prompt was answered (either
     /// way) — never show it again.
     pub font_prompt_done: bool,
@@ -135,6 +174,7 @@ impl Default for State {
             show_hotkeys: false,
             icons: None,
             diff_theme: crate::syntax::DEFAULT_DIFF_THEME,
+            scm_file_view: ScmFileView::Tree,
             font_prompt_done: false,
             auto_open: true,
         }
@@ -212,11 +252,12 @@ pub fn save_state(state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"diff_theme\":\"{}\",\"font_prompt\":{},\"auto_open\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"hotkeys\":{},\"diff_theme\":\"{}\",\"scm_view\":\"{}\",\"font_prompt\":{},\"auto_open\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.show_hotkeys,
         state.diff_theme.as_name(),
+        state.scm_file_view.state_name(),
         state.font_prompt_done,
         state.auto_open
     );
@@ -251,6 +292,11 @@ pub fn parse_state(json: &str) -> State {
             .and_then(|v| v.as_str())
             .and_then(crate::syntax::diff_theme_from_name)
             .unwrap_or(default.diff_theme),
+        scm_file_view: value
+            .get("scm_view")
+            .and_then(|v| v.as_str())
+            .and_then(ScmFileView::from_state_name)
+            .unwrap_or(default.scm_file_view),
         font_prompt_done: value
             .get("font_prompt")
             .and_then(|v| v.as_bool())
@@ -274,14 +320,16 @@ mod tests {
             show_hotkeys: true,
             icons: Some(crate::icons::IconTheme::Emoji),
             diff_theme: crate::syntax::DiffTheme::Nord,
+            scm_file_view: ScmFileView::List,
             font_prompt_done: true,
             auto_open: false,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"diff_theme\":\"Nord\",\"font_prompt\":true,\"auto_open\":false,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"hotkeys\":true,\"diff_theme\":\"Nord\",\"scm_view\":\"list\",\"font_prompt\":true,\"auto_open\":false,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open on.
         assert!(parse_state("{\"merged\":true}").auto_open);
+        assert_eq!(parse_state("{\"merged\":true}").scm_file_view, ScmFileView::Tree);
         assert_eq!(parse_state("garbage"), State::default());
         assert_eq!(parse_state("{\"active\":\"bogus\"}"), State::default());
     }

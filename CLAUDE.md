@@ -274,6 +274,10 @@ Terminal fonts for icon glyphs (Windows, verified live):
   PaneCtl): it runs BEFORE the app loop's first stamp, and a token-less "Sidebar"
   pane older than the launcher's ~6s wait gets REPLACE-killed by the corpse rule
   while the user is still reading the question.
+- **A plugin pane cannot set its own font size**: ratatui emits cells into herdr's parent
+  terminal grid, so every pane shares the terminal emulator's font size. Herdr's public API has
+  no font-size method, and terminal font escape sequences are global and non-portable; do not
+  expose a Sidebar `Font Size` setting unless the host gains a real pane-level rendering API.
 - **WT's bundled Cascadia (checked 1.24: CascadiaCode.ttf/CascadiaMono.ttf) contains NO
   Nerd Font glyphs** — F07B/F0674/E725/E628 all absent from their cmaps (verified with
   fontTools). The "Cascadia now includes Nerd Font symbols" release is the separate
@@ -415,16 +419,40 @@ HACKING.md — budget time for that before promising a patched build.
   have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip the widget
   rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo — the one
   the selection is in (named in the panel header).
+- **SCM file trees** are virtual (`src/change_tree.rs`), built from Git's repo-relative
+  paths rather than the filesystem so deleted and historical files remain visible. The
+  global `scm_view` state setting switches every Changes/Staged/history collection between
+  Tree (default) and the legacy List; Tree compacts single-child directory chains, sorts
+  directories first, defaults new paths open, and keeps separate in-process collapsed sets
+  for Staged and Changes. Directory rows support chevron/name-double-click/Enter/Space/h/l,
+  plus hover and context-menu bulk stage/unstage. `Collapse All` clears expanded history and
+  folds the inner trees as well as their outer sections.
 - **Git drawers** (title-case names, incl. Worktrees): drawer lines carry parsed
   refs (`DrawerRef` — commit hash / stash index / branch / remote / tag / worktree path,
-  see `parse_drawer_ref`). Click or ⏎ shows the ref
-  via colored `git show --stat --patch` in the SAME preview pane (`show/<root>/<spec>[/<path>]`
-  control requests; FILE HISTORY narrows to the followed file). Ctrl+right-click opens
+  see `parse_drawer_ref`). Commits, Branches, Stashes, and Tags expand one file tree at a
+  time; their file leaves open the same structured diff as live changes via immutable
+  `refdiff` requests. Commit/branch/tag comparisons use the tip commit's first parent (the
+  empty tree for a root commit); stash expansion combines its tracked final snapshot with
+  saved untracked files. File History uses `git log --follow --name-status -z`, preserving
+  the historical path across renames and opening that file's structured diff directly.
+  Graph deliberately retains raw colored `git show --stat --patch`; Worktrees and Remotes
+  retain their previous behavior. Ctrl+right-click opens
   per-type menus (checkout / merge / cherry-pick / revert / reset / stash apply-pop-drop /
   fetch / delete / copy); destructive ones route through the generic `Overlay::ConfirmGit`
   y/N prompt. Hovered file rows show a `+`/`−` glyph (click zone = last 5 columns) and the
   section headers a section-wide one (last 6); a dim "ctrl+rclick for menus" hint sits on
   the « footer line whenever the footer is otherwise empty.
+- **Diff statistics**: Changes and Staged each add one `git diff --numstat -z -M` query per
+  existing status refresh; historical refs query name-status plus numstat once when opened.
+  File rows keep a fixed action/status tail; every file/directory hover shows an anchored tooltip
+  with its full repo-relative path and green `+N` / red `-N` (directories aggregate descendants),
+  omitting zero sides without shifting the row. `draw_list` re-hit-tests the saved mouse position
+  every frame because a Git refresh rebuilds/clears row hover while a stationary pointer emits no
+  new `Moved` event. Untracked regular text files are counted directly up to 1 MiB each and 8 MiB
+  total per refresh;
+  larger files, symlinks, binary files, submodules, and unknown numstat values omit counters.
+  Rename trees use the new path and
+  render a dim `← old/path` suffix; staging/unstaging includes both pathspecs.
 - **Sync Changes** (`S` or the ⇅ button, shown only when ahead/behind ≠ 0): `pull --rebase
   --autostash` then `push`, on a background thread polled from tick(). Ahead/behind parse
   from the porcelain `## branch...upstream [ahead N, behind M]` header.
@@ -455,7 +483,7 @@ HACKING.md — budget time for that before promising a patched build.
   to bring home panes left by older builds; no new park plans are written.
 - Clicking a changed file in Source Control (or `o`, or the context menu's Open Diff)
   shows its colored `git diff` in the SAME preview surface the explorer uses: the control
-  file carries typed requests (`file/<path>` / `diff/<root>/<rel>/<kind>`, tab-separated),
+  file carries typed requests (`file` / `diff` / immutable `refdiff`, tab-separated),
   diffs render VS Code-style via the in-crate `diffview.rs` — OUR parse of plain
   `git diff` (one line-number gutter plus a red/green change bar, full-width Catppuccin
   row tints padded at draw time, stronger word-level tint on paired changed lines,
