@@ -89,7 +89,9 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
 - **Sync Changes** — a `⇅ 1↑ 2↓` button appears when you're ahead/behind upstream; one
   press runs `pull --rebase --autostash` + `push` in the background.
 - **Multi-repo** — child repositories are auto-discovered, each with its
-  own header (branch, dirty `*`, sync/commit icons), message box, and Commit button.
+  own header (branch, dirty `*`, sync/commit icons), message box, and Commit button. Full-width
+  dividers frame the repository area, separate every repository block, and mark the shared
+  history drawers below them.
 - **History drawers**: GRAPH, COMMITS, FILE HISTORY (follows renames), BRANCHES, REMOTES,
   STASHES, TAGS. Commits, branches, stashes, and tags expand into file trees whose leaves
   open the same structured, syntax-highlighted diff as live changes.

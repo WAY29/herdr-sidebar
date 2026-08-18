@@ -417,10 +417,13 @@ HACKING.md — budget time for that before promising a patched build.
   worktrees under `.claude/worktrees` would otherwise show up as repos). With >1 repo the
   layout mirrors VS Code's: each repo section carries its OWN inline message box (3-line
   bordered list row) and ✓ Commit button, and the repo header row shows `⎇branch*` (star =
-  dirty) plus clickable ⟳ sync / ✓ commit icons in the fixed last-6 columns. List rows now
-  have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip the widget
-  rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo — the one
-  the selection is in (named in the panel header).
+  dirty) plus clickable ⟳ sync / ✓ commit icons in the fixed last-6 columns. A full-width heavy
+  separator starts the multi-repo area and every repository block ends with one, including the
+  last one before Graph and the remaining drawers; separators are display-only and keyboard/mouse
+  navigation skips them.
+  List rows now have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip
+  the widget rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo —
+  the one the selection is in (named in the panel header).
 - **SCM file trees** are virtual (`src/change_tree.rs`), built from Git's repo-relative
   paths rather than the filesystem so deleted and historical files remain visible. The
   global `scm_view` state setting switches every Changes/Staged/history collection between

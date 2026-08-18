@@ -383,6 +383,8 @@ enum Row {
     ChangesHeader(usize),
     Staged(usize, usize),
     Unstaged(usize, usize),
+    /// Full-width boundary after each repository block in multi-repo mode.
+    RepoSeparator,
     DrawerHeader(Drawer),
     DrawerLine(Drawer, usize),
     HistoryTree(usize),
@@ -501,17 +503,20 @@ impl Row {
             | Row::ChangesHeader(r)
             | Row::Staged(r, _)
             | Row::Unstaged(r, _) => Some(r),
-            Row::DrawerHeader(_)
+            Row::RepoSeparator
+            | Row::DrawerHeader(_)
             | Row::DrawerLine(..)
             | Row::HistoryTree(_)
             | Row::HistoryNotice => None,
         }
     }
 
-    /// Keyboard navigation (j/k, wheel) skips widget rows — they are clicked,
-    /// like VS Code's inputs, not list entries.
+    /// Keyboard navigation skips inline widgets and visual separators.
     fn selectable(self) -> bool {
-        !matches!(self, Row::Message(_) | Row::Commit(_) | Row::HistoryNotice)
+        !matches!(
+            self,
+            Row::Message(_) | Row::Commit(_) | Row::RepoSeparator | Row::HistoryNotice
+        )
     }
 }
 
@@ -1126,10 +1131,14 @@ impl App {
             expanded.rebuild_rows(self.sidebar_state.scm_file_view);
         }
         let multi = self.repos.len() > 1;
+        if multi {
+            self.rows.push(Row::RepoSeparator);
+        }
         for (r, repo) in self.repos.iter().enumerate() {
             if multi {
                 self.rows.push(Row::RepoHeader(r));
                 if repo.collapsed {
+                    self.rows.push(Row::RepoSeparator);
                     continue;
                 }
                 // VS Code gives every repo its own message box and Commit
@@ -1151,6 +1160,9 @@ impl App {
                 for i in 0..repo.changes_rows.len() {
                     self.rows.push(Row::Unstaged(r, i));
                 }
+            }
+            if multi {
+                self.rows.push(Row::RepoSeparator);
             }
         }
         for kind in Drawer::ALL {
@@ -1589,6 +1601,7 @@ impl App {
                     }
                 }
                 Row::HistoryNotice => {}
+                Row::RepoSeparator => {}
             }
         }
         None
@@ -1597,6 +1610,9 @@ impl App {
     /// Ctrl+right-click: the VS Code-style context menu.
     fn open_context_menu(&mut self, x: u16, y: u16) {
         let Some(index) = self.row_at(y) else { return };
+        if self.rows[index] == Row::RepoSeparator {
+            return;
+        }
         self.select(index);
         let (repo, entry, staged) = match self.rows[index] {
             Row::Staged(r, i) => {
@@ -2707,7 +2723,7 @@ impl App {
         };
         match row {
             // Widget rows aren't keyboard-selectable; nothing to activate.
-            Row::Message(_) | Row::Commit(_) => {}
+            Row::Message(_) | Row::Commit(_) | Row::RepoSeparator => {}
             Row::DrawerLine(kind, i) => self.open_drawer_ref(kind, i),
             Row::HistoryTree(i) => match self.expanded_ref.as_ref().and_then(|expanded| expanded.rows.get(i)) {
                 Some(ChangeTreeRow::Directory { .. }) => self.toggle_history_directory(i),
@@ -3548,6 +3564,9 @@ impl App {
                         self.sidebar_state.scm_file_view == ScmFileView::Tree,
                         0,
                     ),
+                    Row::RepoSeparator => {
+                        ListItem::new(repo_separator_line(width))
+                    }
                     Row::HistoryTree(i) => self.expanded_ref.as_ref().map_or_else(
                         || ListItem::new(""),
                         |expanded| {
@@ -3586,7 +3605,7 @@ impl App {
                         Style::default().bg(Color::Rgb(0x2a, 0x2d, 0x2e))
                     };
                     item.style(style)
-                } else if hovered == Some(i) {
+                } else if hovered == Some(i) && *row != Row::RepoSeparator {
                     item.style(Style::default().bg(HOVER_BG))
                 } else {
                     item
@@ -3799,6 +3818,13 @@ fn repo_header_item(repo: &Repo, active: bool, theme: IconTheme, width: usize) -
     spans.push(branch);
     spans.push(icons);
     ListItem::new(Line::from(spans))
+}
+
+fn repo_separator_line(width: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        "━".repeat(width),
+        Style::default().fg(Color::Gray),
+    ))
 }
 
 /// Columns the inline message box's input field spans (between the left
@@ -4361,6 +4387,13 @@ mod tests {
         assert_eq!(status_header_index(&staged, 0, false), Some(74));
 
         assert_eq!(status_header_index(&[Row::ChangesHeader(0)], 0, false), Some(0));
+    }
+
+    #[test]
+    fn repo_separator_is_full_width_and_not_selectable() {
+        assert!(!Row::RepoSeparator.selectable());
+        let line = repo_separator_line(28);
+        assert_eq!(line.spans.iter().map(Span::width).sum::<usize>(), 28);
     }
 
     #[test]
