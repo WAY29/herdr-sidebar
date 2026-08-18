@@ -139,7 +139,6 @@ enum Overlay {
 enum Setting {
     UnifiedSidebar,
     IconTheme,
-    PreviewFull,
     AutoOpen,
     HiddenFiles,
     Hotkeys,
@@ -795,12 +794,6 @@ impl App {
                 true,
             ),
             (
-                Setting::PreviewFull,
-                "Full-size preview",
-                if self.sidebar_state.preview_full { "on" } else { "off" }.to_string(),
-                true,
-            ),
-            (
                 Setting::AutoOpen,
                 "Auto-open sidebar",
                 if self.sidebar_state.auto_open { "on" } else { "off" }.to_string(),
@@ -838,10 +831,6 @@ impl App {
                 self.sidebar_state.show_hotkeys = !self.sidebar_state.show_hotkeys;
                 sidebar::save_state(self.sidebar_state);
             }
-            Setting::PreviewFull => {
-                self.sidebar_state.preview_full = !self.sidebar_state.preview_full;
-                sidebar::save_state(self.sidebar_state);
-            }
             Setting::AutoOpen => {
                 self.sidebar_state.auto_open = !self.sidebar_state.auto_open;
                 sidebar::save_state(self.sidebar_state);
@@ -861,7 +850,7 @@ impl App {
         let Some(Overlay::Settings { selected, rect }) = self.overlay.as_mut() else {
             return;
         };
-        let area = frame.area();
+        let area = Rect::new(0, 0, self.last_width, self.last_height);
         let width = 30.min(area.width);
         let height =
             (rows.len() as u16 + 5 + hint_lines.len() as u16).min(area.height);
@@ -1215,12 +1204,17 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
-        self.last_width = frame.area().width;
-        self.last_height = frame.area().height;
+        let area = frame.area();
+        self.draw_in(frame, area);
+    }
+
+    pub fn draw_in(&mut self, frame: &mut Frame, area: Rect) {
+        self.last_width = area.width;
+        self.last_height = area.height;
         // No own border/title: herdr already frames the pane and titles it with
         // the pane label ("Explorer"/"Sidebar") — a second border read as a
         // double frame.
-        let footer_height = self.footer_height(frame.area().width);
+        let footer_height = self.footer_height(area.width);
         // A breathing row above and below the icons keeps the activity bar
         // from crowding the pane border.
         let activity_height = if self.merged() { 3 } else { 0 };
@@ -1230,7 +1224,7 @@ impl App {
             Constraint::Min(0),
             Constraint::Length(footer_height),
         ])
-        .areas(frame.area());
+        .areas(area);
         self.page = body.height.saturating_sub(1).max(1) as usize;
 
         if self.merged() {
@@ -1320,7 +1314,7 @@ impl App {
                     vec![Line::from(spans)]
                 }
                 _ if self.show_hotkeys() => {
-                    wrap_hints(&self.hints(), frame.area().width, 3)
+                    wrap_hints(&self.hints(), area.width, 3)
                 }
                 _ => Vec::new(),
             }
@@ -1532,7 +1526,7 @@ impl App {
         else {
             return;
         };
-        let area = frame.area();
+        let area = Rect::new(0, 0, self.last_width, self.last_height);
         let label_width = entries
             .iter()
             .map(|e| match e {

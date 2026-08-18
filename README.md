@@ -53,10 +53,9 @@ A real tree, not a directory dump:
   offers to download and install JetBrainsMono Nerd Font for you (Windows, macOS,
   Linux). If the theme ever guesses wrong (icons showing as ⌷ tofu boxes), press `i`
   once; the choice persists.
-- **Click a file and it opens** across everything beside the sidebar — your other panes
-  step aside and Esc puts them back exactly where they were, splits and all (prefer a
-  50/50 split instead? toggle "Full-size preview" off in ⚙ Settings). Line numbers,
-  scrolling, binary-safe). Click another file — the same pane updates in place.
+- **Click a file and it opens** across every column beside the sidebar. Existing panes
+  stay untouched behind the preview; Esc reveals them exactly as they were. Line numbers,
+  scrolling, and binary files are handled, and clicking another file updates in place.
 - **Double-click folders** to fold, hover highlights, mouse wheel, and a
   **Ctrl+right-click context menu**: New File, New Folder, Open with Default App (files
   only — hands the file to the OS-associated app, like a double click in the file

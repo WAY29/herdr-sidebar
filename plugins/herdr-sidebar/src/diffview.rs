@@ -1,7 +1,6 @@
-//! VS Code-style diff rendering: dual line-number gutters, syntax-highlighted
-//! code over red/green row tints, and a darker word-level tint on the changed
-//! segment of paired lines. Input is plain `git diff` output (no ANSI) — the
-//! parsing is ours, so the look is too.
+//! Editor-style diff rendering: one line-number gutter with red/green change
+//! bars, syntax-highlighted code over row tints, and a darker word-level tint
+//! on changed segments. Input is plain `git diff` output (no ANSI).
 
 use std::collections::HashMap;
 
@@ -10,19 +9,22 @@ use ratatui::text::{Line, Span};
 
 use crate::syntax::LineHighlighter;
 
-/// Row tints (VS Code dark diff editor vibes).
-const DEL_BG: Color = Color::Rgb(0x42, 0x22, 0x26);
-const DEL_WORD_BG: Color = Color::Rgb(0x6f, 0x30, 0x36);
-const ADD_BG: Color = Color::Rgb(0x20, 0x39, 0x28);
-const ADD_WORD_BG: Color = Color::Rgb(0x35, 0x59, 0x3d);
-const DEL_MARK: Color = Color::Rgb(0xd1, 0x6d, 0x76);
-const ADD_MARK: Color = Color::Rgb(0x8c, 0xc9, 0x8f);
+/// Catppuccin Mocha layers, matching the preview syntax theme.
+const DEL_BG: Color = Color::Rgb(0x45, 0x23, 0x2f);
+const DEL_WORD_BG: Color = Color::Rgb(0x6e, 0x34, 0x46);
+const ADD_BG: Color = Color::Rgb(0x1f, 0x3a, 0x2a);
+const ADD_WORD_BG: Color = Color::Rgb(0x30, 0x55, 0x3f);
+const DEL_MARK: Color = Color::Rgb(0xf3, 0x8b, 0xa8);
+const ADD_MARK: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
+const GUTTER_FG: Color = Color::Rgb(0x7f, 0x84, 0x9c);
+const FOLD_BG: Color = Color::Rgb(0x31, 0x32, 0x44);
+const FOLD_FG: Color = Color::Rgb(0xa6, 0xad, 0xc8);
 
 /// One parsed diff line, before rendering.
 #[derive(Debug, PartialEq, Eq)]
 enum Ev {
-    /// A new hunk begins (rendered as a dim separator between hunks).
-    Hunk,
+    /// Unchanged lines omitted before the next hunk.
+    Fold(usize),
     /// Unchanged: (old line no, new line no, text).
     Ctx(usize, usize, String),
     Del(usize, String),
@@ -40,6 +42,7 @@ fn parse_events(diff: &str) -> Vec<Ev> {
     for line in diff.lines() {
         if line.starts_with("diff --git") {
             in_hunk = false;
+            seen_hunk = false;
         }
         if (!in_hunk && (line.starts_with("--- ") || line.starts_with("+++ ")))
             || line.starts_with("diff --git")
@@ -57,6 +60,8 @@ fn parse_events(diff: &str) -> Vec<Ev> {
         }
         if line.starts_with("@@") {
             in_hunk = true;
+            let mut next_old = None;
+            let mut next_new = None;
             for tok in line.split_whitespace() {
                 let (sign, rest) = match tok.split_at_checked(1) {
                     Some(pair) => pair,
@@ -65,15 +70,31 @@ fn parse_events(diff: &str) -> Vec<Ev> {
                 let start = rest.split(',').next().unwrap_or("");
                 if let Ok(n) = start.parse::<usize>() {
                     match sign {
-                        "-" => old_no = n,
-                        "+" => new_no = n,
+                        "-" => next_old = Some(n),
+                        "+" => next_new = Some(n),
                         _ => {}
                     }
                 }
             }
-            if seen_hunk {
-                evs.push(Ev::Hunk);
+            let (Some(next_old), Some(next_new)) = (next_old, next_new) else {
+                continue;
+            };
+            let hidden_old = if seen_hunk {
+                next_old.saturating_sub(old_no)
+            } else {
+                next_old.saturating_sub(1)
+            };
+            let hidden_new = if seen_hunk {
+                next_new.saturating_sub(new_no)
+            } else {
+                next_new.saturating_sub(1)
+            };
+            let hidden = hidden_old.min(hidden_new);
+            if hidden > 0 {
+                evs.push(Ev::Fold(hidden));
             }
+            old_no = next_old;
+            new_no = next_new;
             seen_hunk = true;
             continue;
         }
@@ -186,7 +207,7 @@ fn overlay_bg(spans: Vec<Span<'static>>, range: (usize, usize), bg: Color) -> Ve
 }
 
 /// Render a unified diff for `rel` (its extension picks the grammar) into
-/// display lines: `old new ±` gutters, tinted rows, highlighted code.
+/// display lines: line number + change bar, tinted rows, highlighted code.
 pub fn render(rel: &str, diff: &str) -> Vec<Line<'static>> {
     let evs = parse_events(diff);
     let ranges = word_ranges(&evs);
@@ -208,32 +229,35 @@ pub fn render(rel: &str, diff: &str) -> Vec<Line<'static>> {
     let mut old_hl = LineHighlighter::new(rel);
     let mut new_hl = LineHighlighter::new(rel);
 
-    let gutter = |o: Option<usize>, n: Option<usize>, mark: &str, mark_fg: Color| {
-        let fmt = |v: Option<usize>| match v {
-            Some(v) => format!("{v:>w$}"),
-            None => " ".repeat(w),
-        };
+    let gutter = |line: Option<usize>, mark: Option<Color>| {
+        let line = line.map(|n| n.to_string()).unwrap_or_default();
         vec![
-            Span::styled(format!("{} {} ", fmt(o), fmt(n)), Style::default().dim()),
-            Span::styled(format!("{mark} "), Style::default().fg(mark_fg)),
+            Span::styled(format!("{line:>w$} "), Style::default().fg(GUTTER_FG)),
+            match mark {
+                Some(color) => Span::styled("▌ ", Style::default().fg(color)),
+                None => Span::raw("  "),
+            },
         ]
     };
 
     let mut lines = Vec::new();
     for (idx, ev) in evs.iter().enumerate() {
         match ev {
-            Ev::Hunk => lines.push(Line::from(Span::styled(
-                format!("{}⋯", " ".repeat(w * 2 + 2)),
-                Style::default().dim(),
-            ))),
+            Ev::Fold(hidden) => lines.push(
+                Line::from(Span::styled(
+                    format!("{}⋯  {hidden} unmodified lines", " ".repeat(w + 2)),
+                    Style::default().fg(FOLD_FG),
+                ))
+                .style(Style::default().bg(FOLD_BG)),
+            ),
             Ev::Plain(t) => lines.push(Line::from(Span::styled(
                 t.clone(),
                 Style::default().dim(),
             ))),
-            Ev::Ctx(o, n, t) => {
+            Ev::Ctx(_o, n, t) => {
                 old_hl.line(t);
                 let spans = new_hl.line(t);
-                let mut all = gutter(Some(*o), Some(*n), " ", Color::Reset);
+                let mut all = gutter(Some(*n), None);
                 all.extend(spans);
                 lines.push(Line::from(all));
             }
@@ -242,7 +266,7 @@ pub fn render(rel: &str, diff: &str) -> Vec<Line<'static>> {
                 if let Some(&range) = ranges.get(&idx) {
                     spans = overlay_bg(spans, range, DEL_WORD_BG);
                 }
-                let mut all = gutter(Some(*o), None, "-", DEL_MARK);
+                let mut all = gutter(Some(*o), Some(DEL_MARK));
                 all.extend(spans);
                 lines.push(Line::from(all).style(Style::default().bg(DEL_BG)));
             }
@@ -251,7 +275,7 @@ pub fn render(rel: &str, diff: &str) -> Vec<Line<'static>> {
                 if let Some(&range) = ranges.get(&idx) {
                     spans = overlay_bg(spans, range, ADD_WORD_BG);
                 }
-                let mut all = gutter(None, Some(*n), "+", ADD_MARK);
+                let mut all = gutter(Some(*n), Some(ADD_MARK));
                 all.extend(spans);
                 lines.push(Line::from(all).style(Style::default().bg(ADD_BG)));
             }
@@ -283,13 +307,14 @@ mod tests {
     fn diff_parses_gutters_tints_and_word_ranges() {
         let lines = render("app.ts", DIFF);
         assert_eq!(lines.len(), 5);
-        // Context row: both numbers, no tint.
-        assert!(lines[0].to_string().starts_with(" 1  1"));
+        // Context row: one number, no tint.
+        assert!(lines[0].to_string().starts_with(" 1   "));
         assert_eq!(lines[0].style.bg, None);
-        // Deletion: old number only, red row tint.
-        assert!(lines[1].to_string().contains('-'));
+        // Deletion and addition use the same clean bar gutter; color carries
+        // which side they belong to.
+        assert!(lines[1].to_string().starts_with(" 2 ▌ "));
         assert_eq!(lines[1].style.bg, Some(DEL_BG));
-        // Addition: new number only, green row tint.
+        assert!(lines[2].to_string().starts_with(" 2 ▌ "));
         assert_eq!(lines[2].style.bg, Some(ADD_BG));
         // The paired del/add carry a darker word-level tint on the middle.
         let word_tinted = lines[1]
@@ -321,10 +346,10 @@ mod tests {
         );
         let lines = render("q.sql", diff);
         assert_eq!(lines.len(), 3, "the deleted comment line must render");
-        assert!(lines[0].to_string().starts_with(" 1  1"));
+        assert!(lines[0].to_string().starts_with(" 1   "));
         assert!(lines[1].to_string().contains("-- trailing comment"));
         // Old-side numbering must not skip: line 3 is old line 3, not 2.
-        assert!(lines[2].to_string().starts_with(" 3  2"));
+        assert!(matches!(&parse_events(diff)[2], Ev::Ctx(3, 2, _)));
     }
 
     #[test]
@@ -332,8 +357,14 @@ mod tests {
         let two_hunks = "@@ -1,1 +1,1 @@\n ctx\n@@ -9,1 +9,1 @@\n ctx2\n";
         let lines = render("x.rs", two_hunks);
         assert_eq!(lines.len(), 3);
-        assert!(lines[1].to_string().contains('⋯'));
+        assert!(lines[1].to_string().contains("⋯  7 unmodified lines"));
         let bin = render("x.bin", "Binary files a/x.bin and b/x.bin differ\n");
         assert_eq!(bin.len(), 1);
+    }
+
+    #[test]
+    fn leading_omitted_context_reports_the_fold_size() {
+        let lines = render("x.txt", "@@ -10,2 +10,2 @@\n-old\n+new\n same\n");
+        assert_eq!(lines[0].to_string(), "    ⋯  9 unmodified lines");
     }
 }

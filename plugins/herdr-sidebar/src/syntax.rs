@@ -9,9 +9,10 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme, ThemeSet};
+use syntect::highlighting::{FontStyle, Theme};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+use two_face::theme::EmbeddedThemeName;
 
 /// Lines longer than this skip highlighting entirely. syntect's `regex-fancy`
 /// backtracking engine is roughly quadratic in line length on pathological
@@ -24,12 +25,9 @@ fn assets() -> &'static (SyntaxSet, Theme) {
     static ASSETS: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
     ASSETS.get_or_init(|| {
         let syntaxes = two_face::syntax::extra_newlines();
-        let mut themes = ThemeSet::load_defaults();
-        let theme = themes
-            .themes
-            .remove("base16-ocean.dark")
-            .or_else(|| themes.themes.pop_first().map(|(_, t)| t))
-            .unwrap_or_default();
+        let theme = two_face::theme::extra()
+            .get(EmbeddedThemeName::CatppuccinMocha)
+            .clone();
         (syntaxes, theme)
     })
 }

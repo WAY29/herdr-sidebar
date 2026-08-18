@@ -1,27 +1,24 @@
-//! The preview pane: file contents AND git diffs, opened beside the sidebar
-//! (the tree stays visible, like VS Code's editor area). The sidebar keeps
-//! ONE viewer pane per tab and steers it through a small CONTROL FILE: each
-//! click writes a request there; the running viewer polls it and reloads in
-//! place, so repeated clicks never churn panes. Diff requests re-run git
-//! every couple of seconds, so the diff live-updates while you edit.
-//! `q`/Esc (or clicking the ✕ header) closes the pane itself.
+//! File contents and git diffs shown beside the sidebar. Opening a document
+//! zooms the existing sidebar pane and renders the sidebar plus viewer in one
+//! TUI, so the viewer owns the whole editor area without moving the tab's
+//! other panes. `q`/Esc closes the viewer and restores the original layout.
 //!
-//! The tail of this module is the CLIENT side — the request format plus the
-//! ensure-a-viewer-pane logic both sidebar views share.
+//! The tail of this module is the client side — the request handoff shared by
+//! both sidebar views.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::ansi;
 use crate::icons::{IconTheme, icon};
@@ -37,6 +34,13 @@ const POLL: Duration = Duration::from_millis(250);
 /// Preview size guards: don't slurp huge files into a pane.
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_LINES: usize = 5000;
+
+/// Enough room for the viewer to remain useful on a narrow terminal.
+const MIN_PREVIEW_WIDTH: u16 = 24;
+
+/// Control-file header used by the in-process viewer. The width is the
+/// sidebar's pre-zoom width, which keeps the left column stable after zoom.
+const INLINE_CONTROL_PREFIX: &str = "inline\t";
 
 /// Directory for the sidebar's private scratch files (control/park files).
 /// `std::env::temp_dir()` can be a shared, world-writable directory (unix
@@ -137,7 +141,7 @@ struct Doc {
     name: String,
     context: String,
     lines: Vec<Line<'static>>,
-    /// File previews get a line-number gutter; diffs carry their own +/-.
+    /// File previews get a line-number gutter; diffs carry their own gutter.
     numbered: bool,
     scroll: usize,
 }
@@ -285,7 +289,7 @@ fn load_file(target: &Path) -> Doc {
 fn load_diff(root: &Path, rel: &str, kind: &str) -> Doc {
     let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
     // Plain (uncolored) diff: crate::diffview parses it and renders the
-    // VS Code look — dual gutters, tinted rows, syntax-highlighted code.
+    // editor look — line gutter, tinted rows, syntax-highlighted code.
     let mut args: Vec<String> = vec!["diff".into(), "--no-ext-diff".into()];
     match kind {
         "staged" => args.push("--cached".into()),
@@ -335,10 +339,27 @@ fn load_diff(root: &Path, rel: &str, kind: &str) -> Doc {
     }
 }
 
+fn control_request(raw: &str) -> (Option<u16>, &str) {
+    let Some(rest) = raw.strip_prefix(INLINE_CONTROL_PREFIX) else {
+        return (None, raw);
+    };
+    let Some((width, payload)) = rest.split_once('\n') else {
+        return (None, raw);
+    };
+    (width.parse().ok(), payload)
+}
+
 fn read_control(control: &Path) -> Option<Request> {
     let mut buf = String::new();
     std::fs::File::open(control).ok()?.read_to_string(&mut buf).ok()?;
-    parse_request(&buf)
+    parse_request(control_request(&buf).1)
+}
+
+fn read_inline_control(control: &Path) -> Option<(u16, Request)> {
+    let mut buf = String::new();
+    std::fs::File::open(control).ok()?.read_to_string(&mut buf).ok()?;
+    let (width, payload) = control_request(&buf);
+    Some((width?, parse_request(payload)?))
 }
 
 /// Tag our pane (heartbeat-stamped, see launch::HEARTBEAT_STALE_SECS) and
@@ -368,6 +389,7 @@ fn report_identity(doc_name: &str) {
 /// they were.
 fn close_own_pane(control: &Path) {
     if let Some(owner) = owner_pane_id(control) {
+        // One-way compatibility for full-size previews opened by older builds.
         restore_parked(&owner);
         let _ = ipc::call_text("pane.focus", serde_json::json!({ "pane_id": owner }));
     }
@@ -384,6 +406,184 @@ fn owner_pane_id(control: &Path) -> Option<String> {
     let stem = control.file_stem()?.to_str()?;
     let id = stem.strip_prefix("herdr-sidebar-preview-")?.replace('_', ":");
     (!id.is_empty()).then_some(id)
+}
+
+/// In-process viewer hosted by the sidebar pane while that pane is zoomed.
+pub struct InlinePreview {
+    owner: Option<String>,
+    control: Option<PathBuf>,
+    current: Option<Request>,
+    doc: Option<Doc>,
+    theme: IconTheme,
+    sidebar_width: u16,
+    area: Rect,
+    last_refresh: Instant,
+}
+
+impl InlinePreview {
+    pub fn for_current_pane() -> Self {
+        let owner = std::env::var("HERDR_PANE_ID").ok().filter(|id| !id.is_empty());
+        let control = owner.as_deref().map(control_path);
+        if let Some(owner) = owner.as_deref() {
+            restore_parked(owner);
+            close_legacy_viewer(owner);
+        }
+        if let Some(control) = &control {
+            let _ = std::fs::remove_file(control);
+        }
+        Self {
+            owner,
+            control,
+            current: None,
+            doc: None,
+            theme: IconTheme::resolve(
+                std::env::var("HERDR_SIDEBAR_ICONS")
+                    .or_else(|_| std::env::var("HERDR_AA_FILETREE_ICONS"))
+                    .ok()
+                    .as_deref(),
+                crate::state::load_state().icons,
+            ),
+            sidebar_width: 30,
+            area: Rect::default(),
+            last_refresh: Instant::now(),
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.doc.is_some()
+    }
+
+    /// Follow requests written synchronously by `open_in_pane`.
+    pub fn sync(&mut self) {
+        let Some(control) = &self.control else { return };
+        let Some((width, request)) = read_inline_control(control) else {
+            if self.current.is_some() {
+                self.current = None;
+                self.doc = None;
+            }
+            return;
+        };
+        if self.current.as_ref() == Some(&request) {
+            return;
+        }
+        self.sidebar_width = width.max(1);
+        self.doc = Some(load(&request));
+        self.current = Some(request);
+        self.last_refresh = Instant::now();
+    }
+
+    pub fn areas(&self, area: Rect) -> Option<(Rect, Rect)> {
+        self.is_open().then(|| {
+            let min_preview = MIN_PREVIEW_WIDTH.min(area.width.saturating_sub(1)).max(1);
+            let sidebar_width = self
+                .sidebar_width
+                .min(area.width.saturating_sub(min_preview))
+                .max(1)
+                .min(area.width);
+            (
+                Rect::new(area.x, area.y, sidebar_width, area.height),
+                Rect::new(
+                    area.x + sidebar_width,
+                    area.y,
+                    area.width.saturating_sub(sidebar_width),
+                    area.height,
+                ),
+            )
+        })
+    }
+
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        self.area = area;
+        frame.render_widget(Clear, area);
+        let border = Block::default().borders(Borders::LEFT).border_style(Style::default().dim());
+        let inner = border.inner(area);
+        frame.render_widget(border, area);
+        draw_doc(frame, doc, self.theme, inner);
+    }
+
+    pub fn owns_mouse(&self, mouse: &MouseEvent) -> bool {
+        self.is_open()
+            && mouse.column >= self.area.x
+            && mouse.column < self.area.x + self.area.width
+            && mouse.row >= self.area.y
+            && mouse.row < self.area.y + self.area.height
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            self.close();
+            return;
+        }
+        let Some(doc) = self.doc.as_mut() else { return };
+        let max = doc.lines.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => doc.scroll = doc.scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => doc.scroll = (doc.scroll + 1).min(max),
+            KeyCode::PageUp => doc.scroll = doc.scroll.saturating_sub(20),
+            KeyCode::PageDown => doc.scroll = (doc.scroll + 20).min(max),
+            KeyCode::Home | KeyCode::Char('g') => doc.scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => doc.scroll = max,
+            _ => {}
+        }
+    }
+
+    pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse.row == self.area.y
+            && mouse.column < self.area.x + 5
+        {
+            self.close();
+            return;
+        }
+        let Some(doc) = self.doc.as_mut() else { return };
+        let max = doc.lines.len().saturating_sub(1);
+        match mouse.kind {
+            MouseEventKind::ScrollUp => doc.scroll = doc.scroll.saturating_sub(3),
+            MouseEventKind::ScrollDown => doc.scroll = (doc.scroll + 3).min(max),
+            _ => {}
+        }
+    }
+
+    pub fn tick(&mut self) {
+        if self.last_refresh.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_refresh = Instant::now();
+        let Some(request @ Request::Diff { .. }) = self.current.as_ref() else {
+            return;
+        };
+        let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
+        let mut doc = load(request);
+        doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
+        self.doc = Some(doc);
+    }
+
+    fn close(&mut self) {
+        if !self.is_open() {
+            return;
+        }
+        if let Some(control) = &self.control {
+            let _ = std::fs::remove_file(control);
+        }
+        self.current = None;
+        self.doc = None;
+        if let Some(owner) = &self.owner {
+            let _ = ipc::call_text(
+                "pane.zoom",
+                serde_json::json!({ "pane_id": owner, "mode": "off" }),
+            );
+        }
+    }
+}
+
+impl Drop for InlinePreview {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// The viewer's event loop; returns when the user closes it.
@@ -418,7 +618,10 @@ pub fn run(control: &Path) -> std::io::Result<()> {
     let mut page: usize = 20;
     let mut beat: u64 = 0;
     let result = loop {
-        let draw = terminal.draw(|frame| page = draw_doc(frame, &mut doc, theme));
+        let draw = terminal.draw(|frame| {
+            let area = frame.area();
+            page = draw_doc(frame, &mut doc, theme, area);
+        });
         if let Err(e) = draw {
             break Err(e);
         }
@@ -478,8 +681,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
 
 /// Header (✕ close + name + context), body, hint footer. Returns the page
 /// stride for PageUp/Down.
-fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme) -> usize {
-    let area = frame.area();
+fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> usize {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -556,86 +758,43 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme) -> usize {
 // Client side: how the sidebar views open things in the viewer pane.
 // ---------------------------------------------------------------------------
 
-/// Write `payload` to the caller's control file and make sure a live viewer
-/// pane exists beside it (spawning one to our right when needed). Errors are
-/// human-readable notices.
-pub fn open_in_pane(my_pane_id: &str, spawn_cwd: &Path, payload: &str) -> Result<(), String> {
+/// Open or update the in-process viewer, then zoom and focus the sidebar pane.
+pub fn open_in_pane(my_pane_id: &str, _spawn_cwd: &Path, payload: &str) -> Result<(), String> {
     let control = control_path(my_pane_id);
-    write_scratch_file(&control, payload).map_err(|e| format!("preview failed: {e}"))?;
-    let full = crate::state::load_state().preview_full;
+    // One-way compatibility for full-size previews opened by older builds.
+    restore_parked(my_pane_id);
+    close_legacy_viewer(my_pane_id);
 
-    // Measure the sidebar's width share FIRST: closing a stale viewer below
-    // leaves the sidebar momentarily alone at full width, which reads as a
-    // meaningless ~1.0 (that ordering is how the half-width sidebar bug
-    // happened — the old clamp turned the degenerate 1.0 into 0.5).
-    let mut pre_park_frac = owner_frac(my_pane_id);
-
-    // A live viewer in this tab follows the control file by itself; a DEAD
-    // one (stale heartbeat) is closed and replaced.
-    if let Ok(json) = ipc::call_text("pane.list", serde_json::json!({})) {
-        match viewer_pane_in_tab(&json, my_pane_id) {
-            Some((_, false)) => {
-                if full {
-                    // Covers toggling the setting on while a preview is
-                    // already open beside the sidebar.
-                    park_others(my_pane_id);
-                    enforce_owner_width(my_pane_id, pre_park_frac.unwrap_or(0.3));
-                }
-                return Ok(());
-            }
-            Some((id, true)) => {
-                let _ = ipc::call_text("pane.close", serde_json::json!({ "pane_id": id }));
-            }
-            None => {
-                // The viewer died with panes parked (redeploy, tab surgery):
-                // bring them home before opening fresh — and re-measure,
-                // since the restore just rebuilt the layout.
-                restore_parked(my_pane_id);
-                pre_park_frac = owner_frac(my_pane_id).or(pre_park_frac);
-            }
-        }
-    }
-    if full {
-        park_others(my_pane_id);
-    }
-    spawn_viewer_pane(my_pane_id, spawn_cwd, &control, pre_park_frac)?;
-    if full {
-        enforce_owner_width(my_pane_id, pre_park_frac.unwrap_or(0.3));
+    let width = read_inline_control(&control)
+        .map(|(width, _)| width)
+        .unwrap_or_else(|| crossterm::terminal::size().map(|(width, _)| width).unwrap_or(30));
+    let request = format!("{INLINE_CONTROL_PREFIX}{width}\n{payload}");
+    write_scratch_file(&control, &request).map_err(|e| format!("preview failed: {e}"))?;
+    if let Err(e) = ipc::call_text(
+        "pane.zoom",
+        serde_json::json!({ "pane_id": my_pane_id, "mode": "on" }),
+    ) {
+        let _ = std::fs::remove_file(control);
+        return Err(format!("preview failed to focus: {e}"));
     }
     Ok(())
 }
 
-/// The owner pane's share of its tab width right now — `None` when the
-/// geometry carries no signal (a full-width sidebar in a stacked or
-/// single-pane layout would read as ~1.0 and, clamped, once produced a
-/// half-tab sidebar — user-reported).
-fn owner_frac(owner: &str) -> Option<f64> {
-    let layout = ipc::call_text("pane.layout", serde_json::json!({ "pane_id": owner })).ok()?;
-    let msg = serde_json::from_str::<LayoutMsg2>(&layout).ok()?;
-    let body = msg.result.layout;
-    body.panes
-        .iter()
-        .find(|p| p.pane_id.as_deref() == Some(owner))
-        .and_then(|p| p.rect)
-        .map(|r| r.width as f64 / body.area.width.max(1) as f64)
-        .filter(|f| (0.02..0.55).contains(f))
-        .map(|f| f.max(0.1))
-}
-
-/// Pin the sidebar's width after the preview opens: in full mode the tab is
-/// sidebar | viewer, so the root split ratio IS the sidebar's share. Makes
-/// the width deterministic no matter which spawn path ran.
-fn enforce_owner_width(owner: &str, frac: f64) {
-    let _ = ipc::call_text(
-        "layout.set_split_ratio",
-        serde_json::json!({ "pane_id": owner, "path": [], "ratio": frac }),
-    );
-}
-
-/// Close this tab's viewer pane if one is open (Esc from the sidebar),
-/// bringing any parked panes home first.
+/// Close the in-process viewer and any viewer pane left by an older build.
 pub fn close_in_tab(my_pane_id: &str) {
     restore_parked(my_pane_id);
+    let control = control_path(my_pane_id);
+    if control.exists() {
+        let _ = std::fs::remove_file(control);
+        let _ = ipc::call_text(
+            "pane.zoom",
+            serde_json::json!({ "pane_id": my_pane_id, "mode": "off" }),
+        );
+    }
+    close_legacy_viewer(my_pane_id);
+}
+
+fn close_legacy_viewer(my_pane_id: &str) {
     let Ok(json) = ipc::call_text("pane.list", serde_json::json!({})) else {
         return;
     };
@@ -693,70 +852,8 @@ fn viewer_pane_in_tab(pane_list_json: &str, my_pane_id: &str) -> Option<(String,
     Some((id, stale))
 }
 
-/// Split a viewer pane directly to the caller's right: split the right
-/// NEIGHBOR and swap the fresh pane into its left slot (split only goes
-/// right/down), so the layout reads sidebar | preview | rest.
-fn spawn_viewer_pane(
-    my_pane_id: &str,
-    spawn_cwd: &Path,
-    control: &Path,
-    pre_park_frac: Option<f64>,
-) -> Result<(), String> {
-    let layout = ipc::call_text("pane.layout", serde_json::json!({ "pane_id": my_pane_id })).ok();
-    let neighbor = layout.as_deref().and_then(|json| right_neighbor(json, my_pane_id));
-    // Splitting ourselves (no neighbor — e.g. everything else just parked,
-    // leaving us momentarily full-width): keep the width the sidebar had
-    // BEFORE the park, not a ballooned 30-50%.
-    let own_frac = pre_park_frac.unwrap_or(0.3);
-    let (target, ratio, needs_swap) = match &neighbor {
-        Some(id) => (id.clone(), 0.5, true),
-        None => (my_pane_id.to_string(), own_frac, false),
-    };
-    let response = ipc::call_text(
-        "pane.split",
-        serde_json::json!({
-            "target_pane_id": target,
-            "direction": "right",
-            "ratio": ratio,
-            "focus": false,
-            "cwd": spawn_cwd.display().to_string(),
-            "env": crate::state::spawn_env(),
-        }),
-    );
-    let new_pane = response
-        .ok()
-        .and_then(|r| crate::launch::split_pane_id(&r))
-        .ok_or_else(|| "preview pane failed to open".to_string())?;
-    if needs_swap {
-        let _ = ipc::call_text(
-            "pane.swap",
-            serde_json::json!({ "source_pane_id": new_pane, "target_pane_id": target }),
-        );
-    }
-    let exe = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "herdr-sidebar".to_string());
-    #[cfg(windows)]
-    let command = format!("& \"{exe}\" --preview \"{}\"", control.display());
-    #[cfg(not(windows))]
-    let command = format!("exec \"{exe}\" --preview \"{}\"", control.display());
-    let _ = ipc::call_text(
-        "pane.send_input",
-        serde_json::json!({ "pane_id": new_pane, "text": command, "keys": ["Enter"] }),
-    );
-    let _ = ipc::call_text(
-        "pane.rename",
-        serde_json::json!({ "pane_id": new_pane, "label": "Preview" }),
-    );
-    // The split/swap can move focus with the slot; stay in the sidebar so
-    // the user keeps clicking.
-    let _ = ipc::call_text("pane.focus", serde_json::json!({ "pane_id": my_pane_id }));
-    Ok(())
-}
-
-
 // ---------------------------------------------------------------------------
-// Full-size mode: park the tab's other panes while a preview is open.
+// Compatibility with park plans written by pre-same-tab builds.
 // ---------------------------------------------------------------------------
 
 /// Park plan for `owner`'s tab, recorded beside the control file so either
@@ -783,139 +880,7 @@ struct ParkPlan {
     panes: Vec<(String, RectJ)>,
 }
 
-#[derive(serde::Deserialize)]
-struct LayoutMsg2 {
-    result: LayoutRes2,
-}
-#[derive(serde::Deserialize)]
-struct LayoutRes2 {
-    layout: LayoutBody2,
-}
-#[derive(serde::Deserialize)]
-struct LayoutBody2 {
-    area: RectJ,
-    panes: Vec<LayoutPane2>,
-}
-#[derive(serde::Deserialize)]
-struct LayoutPane2 {
-    pane_id: Option<String>,
-    rect: Option<RectJ>,
-}
-
-/// Pane ids in `owner`'s tab that are OURS (sidebar views / preview) and so
-/// never get parked, from a `pane.list` response.
-fn our_panes_in_tab(pane_list_json: &str, owner: &str) -> Vec<String> {
-    #[derive(serde::Deserialize)]
-    struct Msg {
-        result: Res,
-    }
-    #[derive(serde::Deserialize)]
-    struct Res {
-        #[serde(default)]
-        panes: Vec<Pane>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Pane {
-        pane_id: Option<String>,
-        tab_id: Option<String>,
-        label: Option<String>,
-        #[serde(default)]
-        tokens: serde_json::Map<String, serde_json::Value>,
-    }
-    let Ok(msg) = serde_json::from_str::<Msg>(pane_list_json.trim_start_matches('\u{feff}'))
-    else {
-        return vec![owner.to_string()];
-    };
-    let tab = msg
-        .result
-        .panes
-        .iter()
-        .find(|p| p.pane_id.as_deref() == Some(owner))
-        .and_then(|p| p.tab_id.clone());
-    msg.result
-        .panes
-        .iter()
-        .filter(|p| p.tab_id == tab)
-        .filter(|p| {
-            p.pane_id.as_deref() == Some(owner)
-                || matches!(
-                    p.label.as_deref(),
-                    Some("Sidebar" | "Explorer" | "Source Control" | "Preview")
-                )
-                || p.tokens.keys().any(|k| k.starts_with("herdr-sidebar"))
-        })
-        .filter_map(|p| p.pane_id.clone())
-        .collect()
-}
-
-/// Move every non-ours pane of `owner`'s tab into a background tab and
-/// record how to put them back. No-op when nothing to park or a plan
-/// already exists.
-fn park_others(owner: &str) {
-    if park_path(owner).exists() {
-        return;
-    }
-    let Ok(list) = ipc::call_text("pane.list", serde_json::json!({})) else { return };
-    let ours = our_panes_in_tab(&list, owner);
-    let tab = crate::launch::tab_of(&list, owner);
-    if tab.is_empty() {
-        return;
-    }
-    let Ok(layout) = ipc::call_text("pane.layout", serde_json::json!({ "pane_id": owner }))
-    else {
-        return;
-    };
-    let Ok(msg) = serde_json::from_str::<LayoutMsg2>(&layout) else { return };
-    let body = msg.result.layout;
-    let owner_ratio = body
-        .panes
-        .iter()
-        .find(|p| p.pane_id.as_deref() == Some(owner))
-        .and_then(|p| p.rect)
-        .map(|r| r.width as f64 / body.area.width.max(1) as f64)
-        .filter(|f| (0.02..0.55).contains(f))
-        .map(|f| f.max(0.1))
-        .unwrap_or(0.3);
-    let mut others: Vec<(String, RectJ)> = body
-        .panes
-        .into_iter()
-        .filter_map(|p| Some((p.pane_id?, p.rect?)))
-        .filter(|(id, _)| !ours.contains(id))
-        .collect();
-    if others.is_empty() {
-        return;
-    }
-    others.sort_by_key(|(_, r)| (r.y, r.x));
-
-    // First pane opens the park tab; the rest pile in (their layout there
-    // is irrelevant — the tab is never focused).
-    let mut park_tab = String::new();
-    for (i, (id, _)) in others.iter().enumerate() {
-        let dest = if i == 0 {
-            serde_json::json!({ "type": "new_tab", "label": "· preview" })
-        } else {
-            serde_json::json!({ "type": "tab", "tab_id": park_tab, "split": "right" })
-        };
-        let _ = ipc::call_text(
-            "pane.move",
-            serde_json::json!({ "pane_id": id, "destination": dest, "focus": false }),
-        );
-        if i == 0 {
-            if let Ok(list2) = ipc::call_text("pane.list", serde_json::json!({})) {
-                park_tab = crate::launch::tab_of(&list2, id);
-            }
-            if park_tab.is_empty() || park_tab == tab {
-                return; // move didn't take; don't strand a half-plan
-            }
-        }
-    }
-    let plan = ParkPlan { tab, owner_ratio, panes: others };
-    if let Ok(json) = serde_json::to_string(&plan) {
-        let _ = write_scratch_file(&park_path(owner), &json);
-    }
-}
-
-/// Bring parked panes home, rebuilding their grid from the recorded rects
+/// Bring legacy parked panes home, rebuilding their grid from the recorded rects
 /// (each pane re-splits the recorded left/top neighbor at the recorded
 /// proportions). Returns whether a plan existed.
 pub fn restore_parked(owner: &str) -> bool {
@@ -1053,50 +1018,6 @@ fn move_into(tab: &str, pane: &str, target: &str, split: &str, ratio: f64) {
     );
 }
 
-/// The pane directly to the right of `pane_id` (sharing vertical overlap),
-/// from a `pane.layout` response.
-fn right_neighbor(layout_json: &str, pane_id: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Msg {
-        result: Res,
-    }
-    #[derive(serde::Deserialize)]
-    struct Res {
-        layout: L,
-    }
-    #[derive(serde::Deserialize)]
-    struct L {
-        #[serde(default)]
-        panes: Vec<P>,
-    }
-    #[derive(serde::Deserialize)]
-    struct P {
-        pane_id: Option<String>,
-        rect: Option<R>,
-    }
-    #[derive(serde::Deserialize)]
-    struct R {
-        x: i64,
-        y: i64,
-        width: i64,
-        height: i64,
-    }
-    let msg: Msg = serde_json::from_str(layout_json.trim_start_matches('\u{feff}')).ok()?;
-    let panes = &msg.result.layout.panes;
-    let me = panes
-        .iter()
-        .find(|p| p.pane_id.as_deref() == Some(pane_id))?
-        .rect
-        .as_ref()?;
-    let (my_right, my_top, my_bottom) = (me.x + me.width, me.y, me.y + me.height);
-    panes
-        .iter()
-        .filter(|p| p.pane_id.as_deref() != Some(pane_id))
-        .filter_map(|p| Some((p.pane_id.clone()?, p.rect.as_ref()?)))
-        .find(|(_, r)| r.x == my_right && r.y < my_bottom && r.y + r.height > my_top)
-        .map(|(id, _)| id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,6 +1095,18 @@ mod tests {
             Some(Request::File(PathBuf::from("C:/plain.txt")))
         );
         assert_eq!(parse_request("  "), None);
+    }
+
+    #[test]
+    fn inline_control_keeps_the_pre_zoom_sidebar_width() {
+        let request = file_request(Path::new("/tmp/main.rs"));
+        let raw = format!("{INLINE_CONTROL_PREFIX}37\n{request}");
+        let (width, payload) = control_request(&raw);
+        assert_eq!(width, Some(37));
+        assert_eq!(
+            parse_request(payload),
+            Some(Request::File(PathBuf::from("/tmp/main.rs")))
+        );
     }
 
     #[test]

@@ -199,6 +199,13 @@ Socket API (what the CLI wraps; usable directly from plugins, no subprocess need
   the same shape the CLI prints, so CLI-output parsers work unchanged.
 - The API is richer than the CLI: `pane.focus {pane_id}` focuses **by id** (the CLI only has
   the zoom-cycle hack). `pane run` = `pane.send_input {pane_id, text, keys:["Enter"]}`.
+- When a plugin really needs a separate TUI pane, prefer `plugin.pane.open` over
+  `pane.split` + `pane.send_input`:
+  it starts the manifest argv directly, so users never see a shell prompt or launch command.
+  Against herdr 0.8, a relative command is resolved against the requested pane cwd and a literal
+  `{{plugin.root}}` is NOT expanded. Follow reviewr: use a non-interactive `sh -c 'exec
+  "$HERDR_PLUGIN_ROOT/…"'` command (plus a platform-specific Windows entry). The API has no
+  split-ratio parameter; set the created split afterward with `layout.set_split_ratio` when needed.
 - Method names/params: `herdr api schema --json`, or `src/api/schema*` in the herdr source.
 
 Mouse in plugin TUIs: herdr forwards clicks/motion/wheel to a pane app that enables mouse
@@ -438,32 +445,21 @@ HACKING.md — budget time for that before promising a patched build.
 
 ### Diff preview
 
-- Previews/diffs open FULL-SIZE by default — everything beside the sidebar, sidebar
-  still visible (user-rejected the zoom approach, which covered it). Mechanism: the
-  tab's other panes are PARKED — `pane.move`d into a background "· preview" tab — with
-  their rects recorded in a plan file beside the control file; the viewer then splits
-  the momentarily-full-width sidebar at its PRE-park width fraction (captured before the
-  park — measuring after reads 100%). Esc (either process; both read the plan) moves
-  them home by guillotine-recovering the split tree from the recorded rects and
-  replaying it pre-order (first pane splits the viewer, each split re-splits the
-  first-subtree's top-left pane at the recorded ratio), then `layout.set_split_ratio`
-  restores the sidebar's width. Verified: exact rects round-trip. Zoom would NOT work
-  here: it covers the whole tab, and same-tab `pane.move` being a no-op is why parking
-  bounces through a real background tab. Stale plans (viewer died with panes parked,
-  e.g. redeploy) self-heal on the next preview open. **Measure the sidebar's width
-  fraction FIRST, before closing a stale viewer**: the close leaves the sidebar
-  momentarily alone at full width, and a post-close measurement reads a meaningless
-  ~1.0 (clamped to 0.5, that was the half-width-sidebar bug). `owner_frac` treats
-  any fraction outside 0.02..0.55 as no-signal (`None` → 0.3 fallback), and after
-  the viewer opens `enforce_owner_width` pins the root split to the pre-click
-  fraction so the width is deterministic whichever spawn path ran. "Full-size preview" in ⚙ Settings
-  (persisted `preview_full`, default on) reverts to the 50/50 beside-mode split.
+- Previews/diffs render **in the sidebar process itself**. Opening records the request
+  plus the sidebar's pre-zoom width, then `pane.zoom on` focuses the sidebar pane; the
+  same TUI redraws the original-width sidebar on the left and gives every remaining
+  column to the viewer. Existing panes are only covered by herdr's zoom — never moved,
+  closed, or restarted — and no Preview process, shell command, pane, or temporary tab
+  is created. Esc/q removes the request and sends `pane.zoom off`, revealing the exact
+  original layout with focus back in the sidebar. The old park-plan reader remains only
+  to bring home panes left by older builds; no new park plans are written.
 - Clicking a changed file in Source Control (or `o`, or the context menu's Open Diff)
-  shows its colored `git diff` in the SAME preview pane the explorer uses: the control
+  shows its colored `git diff` in the SAME preview surface the explorer uses: the control
   file carries typed requests (`file/<path>` / `diff/<root>/<rel>/<kind>`, tab-separated),
   diffs render VS Code-style via the in-crate `diffview.rs` — OUR parse of plain
-  `git diff` (dual old/new gutters, full-width red/green row tints padded at draw time,
-  darker word-level tint on paired changed lines, syntax-highlighted code through two
+  `git diff` (one line-number gutter plus a red/green change bar, full-width Catppuccin
+  row tints padded at draw time, stronger word-level tint on paired changed lines,
+  syntax-highlighted code through two
   stateful `LineHighlighter`s for old/new contexts). `ansi.rs` (SGR parser) still renders
   `git show` output (ansi-to-tui pins an older ratatui — don't add it), and diffs re-run
   every ~2s so they live-update.
@@ -579,12 +575,11 @@ Hard-won capture gotchas:
 - Claude re-renders its banner on RESIZE: a narrow-launch trick does not survive a
   later widen — the email comes back. The pane width at capture time is what counts.
 - The sidebar's `state.json` is **GLOBAL** (%LOCALAPPDATA%\herdr\plugins\herdr-sidebar
-  — shared with the user's real session!). The separated shot toggles unified off and
-  needs `preview_full:false` (edit the file directly; the settings-modal Down-count is
-  view-dependent) — RESTORE merged:true + preview_full:true when done.
+  — shared with the user's real session!). The separated shot toggles unified off —
+  restore `merged:true` when done.
 - Separated shot composition: after toggling, pin Source Control to 38 cols
-  (root ratio 0.275), open the routes.rs diff (beside mode), then `pane swap` the
-  viewer to the far right so it reads SC | Explorer | diff.
+  (root ratio 0.275) and capture the two sidebar panes before opening a preview;
+  previews zoom their owning pane and intentionally cover the other panes until Esc.
 - The spaces list order = workspace CREATION order; recreating a workspace mid-shoot
   sends it to the bottom — recreate ALL of them in roster order.
 - Fake agent rows (pane.report_agent) do NOT survive a server restart — re-report them.
@@ -639,8 +634,8 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   installs came up as a pinned separate Explorer. Flipped to `true` (existing users keep
   their persisted value).
 - Everything else verified working on macOS unchanged: ensure hook docks on tab focus,
-  unified view switch, SCM drawers/commit box in a real repo, full-size diff preview with
-  park/restore round-trip, first-run Nerd Font prompt (curl+unzip path), heartbeat tokens,
+  unified view switch, SCM drawers/commit box in a real repo, in-process zoomed diff preview,
+  first-run Nerd Font prompt (curl+unzip path), heartbeat tokens,
   herdr-notes toggle.
 
 ## Herdr workspace

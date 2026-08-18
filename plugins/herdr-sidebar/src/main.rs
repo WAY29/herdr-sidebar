@@ -135,12 +135,30 @@ fn read_stdin() -> std::io::Result<String> {
 fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
     let root = std::env::current_dir()?;
     let mut app = explorer_app::App::new(root);
+    let mut preview = viewer::InlinePreview::for_current_pane();
     loop {
-        terminal.draw(|frame| app.draw(frame))?;
+        preview.sync();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            if let Some((sidebar, viewer)) = preview.areas(area) {
+                app.draw_in(frame, sidebar);
+                preview.draw(frame, viewer);
+            } else {
+                app.draw(frame);
+            }
+        })?;
         // 500ms: quick enough that a finished folder pick lands promptly,
         // still cheap for the heartbeat.
         if event::poll(Duration::from_millis(500))? {
             let exit = match event::read()? {
+                Event::Key(key) if preview.is_open() => {
+                    preview.on_key(key);
+                    None
+                }
+                Event::Mouse(mouse) if preview.owns_mouse(&mouse) => {
+                    preview.on_mouse(mouse);
+                    None
+                }
                 Event::Key(key) => app.on_key(key),
                 Event::Mouse(mouse) => app.on_mouse(mouse),
                 _ => None, // resize, focus, … simply fall through to a redraw
@@ -149,9 +167,11 @@ fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit
                 return Ok(exit);
             }
         } else {
-            app.heartbeat();
             app.poll_picker();
         }
+        app.heartbeat();
+        preview.sync();
+        preview.tick();
     }
 }
 
@@ -160,10 +180,28 @@ fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit
 fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
     let cwd = std::env::current_dir()?;
     let mut app = scm_app::App::new(cwd);
+    let mut preview = viewer::InlinePreview::for_current_pane();
     loop {
-        terminal.draw(|frame| app.draw(frame))?;
+        preview.sync();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            if let Some((sidebar, viewer)) = preview.areas(area) {
+                app.draw_in(frame, sidebar);
+                preview.draw(frame, viewer);
+            } else {
+                app.draw(frame);
+            }
+        })?;
         if event::poll(REFRESH_EVERY)? {
             let exit = match event::read()? {
+                Event::Key(key) if preview.is_open() => {
+                    preview.on_key(key);
+                    None
+                }
+                Event::Mouse(mouse) if preview.owns_mouse(&mouse) => {
+                    preview.on_mouse(mouse);
+                    None
+                }
                 Event::Key(key) => app.on_key(key),
                 Event::Mouse(mouse) => app.on_mouse(mouse),
                 _ => None,
@@ -172,9 +210,11 @@ fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
                 return Ok(exit);
             }
         } else {
-            app.heartbeat();
             app.poll_picker();
             app.tick();
         }
+        app.heartbeat();
+        preview.sync();
+        preview.tick();
     }
 }
