@@ -15,6 +15,7 @@ use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::buffer::CellWidth;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
@@ -178,6 +179,156 @@ struct Doc {
     scroll: usize,
     /// Expandable fold owned by each rendered row; empty for non-diff docs.
     folds: Vec<Option<crate::diffview::FoldId>>,
+    /// Width-cached visual rows for structured diffs, plus their source rows.
+    visual_lines: Vec<Line<'static>>,
+    visual_rows: Vec<usize>,
+    visual_width: u16,
+}
+
+impl Doc {
+    fn new(
+        name: String,
+        context: String,
+        lines: Vec<Line<'static>>,
+        numbered: bool,
+        folds: Vec<Option<crate::diffview::FoldId>>,
+    ) -> Self {
+        Self {
+            name,
+            context,
+            lines,
+            numbered,
+            scroll: 0,
+            folds,
+            visual_lines: Vec::new(),
+            visual_rows: Vec::new(),
+            visual_width: 0,
+        }
+    }
+
+    fn ensure_visual_lines(&mut self, width: u16) {
+        let width = width.max(1);
+        if self.folds.is_empty() || self.visual_width == width {
+            return;
+        }
+        (self.visual_lines, self.visual_rows) = reflow_diff_lines(&self.lines, width);
+        self.visual_width = width;
+    }
+
+    fn visual_len(&self) -> usize {
+        if self.visual_width == 0 {
+            self.lines.len()
+        } else {
+            self.visual_lines.len()
+        }
+    }
+
+    fn source_row_at(&self, visual_row: usize) -> Option<usize> {
+        if self.visual_width == 0 {
+            (visual_row < self.lines.len()).then_some(visual_row)
+        } else {
+            self.visual_rows.get(visual_row).copied()
+        }
+    }
+}
+
+fn flush_wrapped_span(
+    spans: &mut Vec<Span<'static>>,
+    text: &mut String,
+    style: &mut Option<Style>,
+) {
+    if let Some(style) = style.take()
+        && !text.is_empty()
+    {
+        spans.push(Span::styled(std::mem::take(text), style));
+    }
+}
+
+fn finish_wrapped_line(
+    mut spans: Vec<Span<'static>>,
+    text: &mut String,
+    style: &mut Option<Style>,
+    line_style: Style,
+    width: u16,
+    used: u16,
+) -> Line<'static> {
+    flush_wrapped_span(&mut spans, text, style);
+    if line_style.bg.is_some() && used < width {
+        spans.push(Span::raw(" ".repeat(usize::from(width - used))));
+    }
+    Line::from(spans).style(line_style)
+}
+
+/// Hard-wrap one styled diff row by terminal cells. Continuations keep an
+/// empty copy of the original line-number/change-bar gutter.
+fn wrap_diff_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let indent = if line.spans.len() >= 2 {
+        line.spans.iter().take(2).map(Span::width).sum::<usize>()
+    } else {
+        0
+    };
+    let indent = u16::try_from(indent)
+        .unwrap_or(u16::MAX)
+        .min(width.saturating_sub(1));
+    let mut rows = Vec::new();
+    let mut spans = Vec::new();
+    let mut text = String::new();
+    let mut style = None;
+    let mut used = 0u16;
+    let mut content_start = 0u16;
+
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let grapheme_width = grapheme.symbol.cell_width();
+        if used > content_start
+            && grapheme_width > 0
+            && used.saturating_add(grapheme_width) > width
+        {
+            rows.push(finish_wrapped_line(
+                std::mem::take(&mut spans),
+                &mut text,
+                &mut style,
+                line.style,
+                width,
+                used,
+            ));
+            if indent > 0 {
+                spans.push(Span::raw(" ".repeat(usize::from(indent))));
+            }
+            used = indent;
+            content_start = indent;
+        }
+        if style != Some(grapheme.style) {
+            flush_wrapped_span(&mut spans, &mut text, &mut style);
+            style = Some(grapheme.style);
+        }
+        text.push_str(grapheme.symbol);
+        used = used.saturating_add(grapheme_width);
+    }
+
+    rows.push(finish_wrapped_line(
+        spans,
+        &mut text,
+        &mut style,
+        line.style,
+        width,
+        used,
+    ));
+    rows
+}
+
+fn reflow_diff_lines(
+    lines: &[Line<'static>],
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    let mut visual_lines = Vec::new();
+    let mut visual_rows = Vec::new();
+    for (source_row, line) in lines.iter().enumerate() {
+        let wrapped = wrap_diff_line(line, width);
+        visual_rows.extend(std::iter::repeat_n(source_row, wrapped.len()));
+        visual_lines.extend(wrapped);
+    }
+    (visual_lines, visual_rows)
 }
 
 fn load(
@@ -237,14 +388,13 @@ fn load_show(root: &Path, spec: &str, path: Option<&str>) -> Doc {
             }
         }
     };
-    Doc {
-        name: spec.to_string(),
-        context: format!("git show {spec} — {}", root.display()),
+    Doc::new(
+        spec.to_string(),
+        format!("git show {spec} — {}", root.display()),
         lines,
-        numbered: false,
-        scroll: 0,
-        folds: Vec::new(),
-    }
+        false,
+        Vec::new(),
+    )
 }
 
 /// Render markdown text via `glow`. Returns `None` when glow is not installed
@@ -331,14 +481,7 @@ fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
             }
         }
     };
-    Doc {
-        name,
-        context: target.display().to_string(),
-        lines,
-        numbered,
-        scroll: 0,
-        folds: Vec::new(),
-    }
+    Doc::new(name, target.display().to_string(), lines, numbered, Vec::new())
 }
 
 fn load_diff(
@@ -377,14 +520,13 @@ fn load_diff(
         "untracked" => "untracked",
         _ => "working tree",
     };
-    Doc {
-        name: name.clone(),
-        context: format!("{} — {what} diff", root.join(rel).display()),
+    Doc::new(
+        name,
+        format!("{} — {what} diff", root.join(rel).display()),
         lines,
-        numbered: false,
-        scroll: 0,
+        false,
         folds,
-    }
+    )
 }
 
 fn load_ref_diff(
@@ -410,14 +552,13 @@ fn load_ref_diff(
     }
     args.push(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     let (lines, folds) = run_structured_diff(root, rel, &args, diff_theme, expanded_folds);
-    Doc {
-        name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
-        context: format!("{} — {new_spec}", root.join(rel).display()),
+    Doc::new(
+        rel.rsplit('/').next().unwrap_or(rel).to_string(),
+        format!("{} — {new_spec}", root.join(rel).display()),
         lines,
-        numbered: false,
-        scroll: 0,
+        false,
         folds,
-    }
+    )
 }
 
 fn run_structured_diff(
@@ -674,7 +815,7 @@ impl InlinePreview {
             return;
         }
         let Some(doc) = self.doc.as_mut() else { return };
-        let max = doc.lines.len().saturating_sub(1);
+        let max = doc.visual_len().saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => doc.scroll = doc.scroll.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => doc.scroll = (doc.scroll + 1).min(max),
@@ -695,8 +836,9 @@ impl InlinePreview {
             return;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && let Some(row) =
+            && let Some(visual_row) =
                 doc_row_at(self.body, self.doc.as_ref().map_or(0, |doc| doc.scroll), &mouse)
+            && let Some(row) = self.doc.as_ref().and_then(|doc| doc.source_row_at(visual_row))
             && let Some(fold) = self
                 .doc
                 .as_ref()
@@ -710,7 +852,7 @@ impl InlinePreview {
             return;
         }
         let Some(doc) = self.doc.as_mut() else { return };
-        let max = doc.lines.len().saturating_sub(1);
+        let max = doc.visual_len().saturating_sub(1);
         match mouse.kind {
             MouseEventKind::ScrollUp => doc.scroll = doc.scroll.saturating_sub(3),
             MouseEventKind::ScrollDown => doc.scroll = (doc.scroll + 3).min(max),
@@ -733,7 +875,7 @@ impl InlinePreview {
         };
         let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
         let mut doc = load(request, self.diff_theme, &self.expanded_folds);
-        doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
+        doc.scroll = keep;
         self.doc = Some(doc);
     }
 
@@ -741,7 +883,7 @@ impl InlinePreview {
         let Some(request) = self.current.as_ref() else { return };
         let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
         let mut doc = load(request, self.diff_theme, &self.expanded_folds);
-        doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
+        doc.scroll = keep;
         self.doc = Some(doc);
         self.last_refresh = Instant::now();
     }
@@ -790,14 +932,15 @@ pub fn run(control: &Path) -> std::io::Result<()> {
     let mut doc = current
         .as_ref()
         .map(|request| load(request, diff_theme, &expanded_folds))
-        .unwrap_or_else(|| Doc {
-        name: "(nothing to show)".into(),
-        context: String::new(),
-        lines: vec![Line::raw("(waiting for a click in the sidebar)")],
-        numbered: false,
-        scroll: 0,
-        folds: Vec::new(),
-    });
+        .unwrap_or_else(|| {
+            Doc::new(
+                "(nothing to show)".into(),
+                String::new(),
+                vec![Line::raw("(waiting for a click in the sidebar)")],
+                false,
+                Vec::new(),
+            )
+        });
     report_identity(&doc.name);
 
     // Blank the primary screen so pane handoffs never flash the shell.
@@ -821,7 +964,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
         if let Err(e) = draw {
             break Err(e);
         }
-        let max = doc.lines.len().saturating_sub(1);
+        let max = doc.visual_len().saturating_sub(1);
         if event::poll(POLL)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
@@ -845,14 +988,15 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                         break Ok(());
                     }
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(row) = doc_row_at(body, doc.scroll, &mouse)
+                        if let Some(visual_row) = doc_row_at(body, doc.scroll, &mouse)
+                            && let Some(row) = doc.source_row_at(visual_row)
                             && let Some(fold) = doc.folds.get(row).copied().flatten()
                             && expanded_folds.insert(fold)
                             && let Some(request) = &current
                         {
                             let keep = doc.scroll;
                             doc = load(request, diff_theme, &expanded_folds);
-                            doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
+                            doc.scroll = keep;
                         }
                     }
                     _ => {}
@@ -880,7 +1024,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                 let keep = doc.scroll;
                 diff_theme = crate::state::load_state().diff_theme;
                 doc = load(request, diff_theme, &expanded_folds);
-                doc.scroll = keep.min(doc.lines.len().saturating_sub(1));
+                doc.scroll = keep;
             }
         }
     };
@@ -907,9 +1051,10 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> (
     ])
     .areas(area);
 
+    doc.ensure_visual_lines(body.width);
     doc.scroll = doc
         .scroll
-        .min(doc.lines.len().saturating_sub(usize::from(body.height).max(1)));
+        .min(doc.visual_len().saturating_sub(usize::from(body.height).max(1)));
 
     let file_icon = icon(theme, &doc.name, false, false);
     let icon_style = match file_icon.rgb {
@@ -937,32 +1082,41 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> (
     spans.push(Span::styled(format!("  {shown}"), Style::default().dim()));
     frame.render_widget(Paragraph::new(Line::from(spans)), header);
 
-    let number_width = doc.lines.len().to_string().len();
-    let text: Vec<Line> = doc
-        .lines
-        .iter()
-        .enumerate()
-        .skip(doc.scroll)
-        .take(usize::from(body.height))
-        .map(|(n, line)| {
-            if doc.numbered {
-                let mut spans =
-                    vec![Span::styled(format!("{:>number_width$} ", n + 1), Style::default().dim())];
-                spans.extend(line.spans.iter().cloned());
-                Line::from(spans)
-            } else {
-                let mut line = line.clone();
-                // Tinted diff rows fill the full row, like an editor.
-                if line.style.bg.is_some() {
-                    let pad = usize::from(body.width).saturating_sub(line.width());
-                    if pad > 0 {
-                        line.spans.push(Span::raw(" ".repeat(pad)));
+    let text: Vec<Line> = if doc.visual_width > 0 {
+        doc.visual_lines
+            .iter()
+            .skip(doc.scroll)
+            .take(usize::from(body.height))
+            .cloned()
+            .collect()
+    } else {
+        let number_width = doc.lines.len().to_string().len();
+        doc.lines
+            .iter()
+            .enumerate()
+            .skip(doc.scroll)
+            .take(usize::from(body.height))
+            .map(|(n, line)| {
+                if doc.numbered {
+                    let mut spans = vec![Span::styled(
+                        format!("{:>number_width$} ", n + 1),
+                        Style::default().dim(),
+                    )];
+                    spans.extend(line.spans.iter().cloned());
+                    Line::from(spans)
+                } else {
+                    let mut line = line.clone();
+                    if line.style.bg.is_some() {
+                        let pad = usize::from(body.width).saturating_sub(line.width());
+                        if pad > 0 {
+                            line.spans.push(Span::raw(" ".repeat(pad)));
+                        }
                     }
+                    line
                 }
-                line
-            }
-        })
-        .collect();
+            })
+            .collect()
+    };
     frame.render_widget(Paragraph::new(text), body);
 
     frame.render_widget(
@@ -1403,6 +1557,44 @@ mod tests {
         ]}}"#;
         assert_eq!(focused_peer_in_tab(owner_focused, "w1:p1"), None);
         assert_eq!(focused_peer_in_tab("not json", "w1:p1"), None);
+    }
+
+    #[test]
+    fn long_diff_rows_wrap_with_gutter_style_and_source_mapping() {
+        let row_bg = Color::Rgb(40, 20, 20);
+        let word_bg = Color::Rgb(80, 30, 30);
+        let code = "abcdefghij-WRAP_TAIL_VISIBLE";
+        let long = Line::from(vec![
+            Span::raw("12 "),
+            Span::raw("▌ "),
+            Span::styled(
+                code,
+                Style::default().fg(Color::White).bg(word_bg),
+            ),
+        ])
+        .style(Style::default().bg(row_bg));
+        let short = Line::raw("short");
+
+        let (lines, rows) = reflow_diff_lines(&[long, short], 12);
+        let wrapped = rows.iter().take_while(|&&row| row == 0).count();
+        assert!(wrapped > 1);
+        assert!(lines[..wrapped]
+            .iter()
+            .skip(1)
+            .all(|line| line.to_string().starts_with("     ")));
+        let rebuilt = lines[..wrapped]
+            .iter()
+            .map(|line| line.to_string().chars().skip(5).collect::<String>())
+            .map(|chunk| chunk.trim_end().to_string())
+            .collect::<String>();
+        assert_eq!(rebuilt, code);
+        assert!(lines[..wrapped].iter().all(|line| line.width() == 12));
+        assert!(lines[..wrapped]
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| span.style.bg == Some(word_bg)));
+        assert!(rows[..wrapped].iter().all(|&row| row == 0));
+        assert_eq!(rows[wrapped], 1);
     }
 
     #[test]

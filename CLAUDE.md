@@ -504,9 +504,13 @@ HACKING.md — budget time for that before promising a patched build.
   file carries typed requests (`file` / `diff` / immutable `refdiff`, tab-separated),
   diffs render VS Code-style via the in-crate `diffview.rs` — OUR parse of plain
   `git diff` (one line-number gutter plus a red/green change bar, full-width Catppuccin
-  row tints padded at draw time, stronger word-level tint on paired changed lines,
+  row tints, stronger word-level tint on paired changed lines,
   syntax-highlighted code through two
-  stateful `LineHighlighter`s for old/new contexts). Git receives `--unified=5000`, matching
+  stateful `LineHighlighter`s for old/new contexts). Long structured-diff rows hard-wrap to
+  the current Viewer width; continuation rows keep an empty gutter and the same row/word styles.
+  Viewer scrolling and fold hit-testing use a cached visual-row-to-source-row map, so wrapping
+  and terminal resizes do not detach a continuation from its original fold. Git receives
+  `--unified=5000`, matching
   the Viewer's own line ceiling; `diffview` then retains those Context events behind clickable
   `⋯ N unmodified lines` rows. Clicking expands only that anchored old/new line range, and the
   expanded set survives theme changes plus the ~2s live refresh. Gaps beyond the 5000-line
