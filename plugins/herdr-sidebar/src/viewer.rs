@@ -526,6 +526,7 @@ fn owner_pane_id(control: &Path) -> Option<String> {
 /// In-process viewer hosted by the sidebar pane while that pane is zoomed.
 pub struct InlinePreview {
     owner: Option<String>,
+    restore_focus: Option<String>,
     control: Option<PathBuf>,
     current: Option<Request>,
     doc: Option<Doc>,
@@ -541,6 +542,7 @@ pub struct InlinePreview {
 impl InlinePreview {
     pub fn for_current_pane() -> Self {
         let owner = std::env::var("HERDR_PANE_ID").ok().filter(|id| !id.is_empty());
+        let restore_focus = owner.as_deref().and_then(focused_peer);
         let control = owner.as_deref().map(control_path);
         if let Some(owner) = owner.as_deref() {
             restore_parked(owner);
@@ -552,6 +554,7 @@ impl InlinePreview {
         let state = crate::state::load_state();
         Self {
             owner,
+            restore_focus,
             control,
             current: None,
             doc: None,
@@ -573,6 +576,32 @@ impl InlinePreview {
 
     pub fn is_open(&self) -> bool {
         self.doc.is_some()
+    }
+
+    /// Remember the focused peer while the pointer approaches an unfocused
+    /// sidebar. Herdr forwards the mouse press before focusing the pane, so a
+    /// direct file click keeps this target for Preview close.
+    pub fn observe_mouse(&mut self) {
+        if self.is_open() {
+            return;
+        }
+        if let Some(peer) = self.owner.as_deref().and_then(focused_peer) {
+            self.restore_focus = Some(peer);
+        }
+    }
+
+    /// A normal interaction with the unzoomed Sidebar makes it the intended
+    /// return target; don't retain an older peer from a previous focus visit.
+    pub fn claim_focus(&mut self) {
+        if !self.is_open() {
+            self.restore_focus = None;
+        }
+    }
+
+    /// Focus reporting reaches the old pane after Herdr has selected the new
+    /// one, so pane.list now identifies the exact peer to restore later.
+    pub fn on_focus_lost(&mut self) {
+        self.observe_mouse();
     }
 
     /// Follow requests written synchronously by `open_in_pane`.
@@ -732,6 +761,9 @@ impl InlinePreview {
                 "pane.zoom",
                 serde_json::json!({ "pane_id": owner, "mode": "off" }),
             );
+        }
+        if let Some(pane_id) = self.restore_focus.take() {
+            let _ = ipc::call_text("pane.focus", serde_json::json!({ "pane_id": pane_id }));
         }
     }
 }
@@ -978,6 +1010,49 @@ pub fn close_in_tab(my_pane_id: &str) {
         );
     }
     close_legacy_viewer(my_pane_id);
+}
+
+fn focused_peer(owner: &str) -> Option<String> {
+    let panes = ipc::call_text("pane.list", serde_json::json!({})).ok()?;
+    focused_peer_in_tab(&panes, owner)
+}
+
+fn focused_peer_in_tab(pane_list_json: &str, owner: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Msg {
+        result: Res,
+    }
+    #[derive(serde::Deserialize)]
+    struct Res {
+        #[serde(default)]
+        panes: Vec<Pane>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Pane {
+        pane_id: Option<String>,
+        tab_id: Option<String>,
+        #[serde(default)]
+        focused: bool,
+    }
+
+    let msg: Msg = serde_json::from_str(pane_list_json.trim_start_matches('\u{feff}')).ok()?;
+    let tab = msg
+        .result
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id.as_deref() == Some(owner))?
+        .tab_id
+        .as_deref()?;
+    msg.result
+        .panes
+        .iter()
+        .find(|pane| {
+            pane.focused
+                && pane.pane_id.as_deref() != Some(owner)
+                && pane.tab_id.as_deref() == Some(tab)
+        })?
+        .pane_id
+        .clone()
 }
 
 fn close_legacy_viewer(my_pane_id: &str) {
@@ -1310,6 +1385,24 @@ mod tests {
             parse_request(payload),
             Some(Request::File(PathBuf::from("/tmp/main.rs")))
         );
+    }
+
+    #[test]
+    fn focused_peer_is_scoped_to_the_sidebar_tab() {
+        let panes = r#"{"result":{"panes":[
+            {"pane_id":"w1:p1","tab_id":"w1:t1"},
+            {"pane_id":"w1:p2","tab_id":"w1:t1","focused":true},
+            {"pane_id":"w1:p3","tab_id":"w1:t2"}
+        ]}}"#;
+        assert_eq!(focused_peer_in_tab(panes, "w1:p1").as_deref(), Some("w1:p2"));
+        assert_eq!(focused_peer_in_tab(panes, "w1:p3"), None);
+
+        let owner_focused = r#"{"result":{"panes":[
+            {"pane_id":"w1:p1","tab_id":"w1:t1","focused":true},
+            {"pane_id":"w1:p2","tab_id":"w1:t1"}
+        ]}}"#;
+        assert_eq!(focused_peer_in_tab(owner_focused, "w1:p1"), None);
+        assert_eq!(focused_peer_in_tab("not json", "w1:p1"), None);
     }
 
     #[test]

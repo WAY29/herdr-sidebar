@@ -479,8 +479,15 @@ HACKING.md — budget time for that before promising a patched build.
   column to the viewer. Existing panes are only covered by herdr's zoom — never moved,
   closed, or restarted — and no Preview process, shell command, pane, or temporary tab
   is created. Esc/q removes the request and sends `pane.zoom off`, revealing the exact
-  original layout with focus back in the sidebar. The old park-plan reader remains only
+  original layout. The old park-plan reader remains only
   to bring home panes left by older builds; no new park plans are written.
+- Preview focus restoration follows the opener: when a file is clicked while another pane
+  owns focus, Esc/q unzooms and `pane.focus` returns to that exact same-tab pane; when Preview
+  is opened from an already-focused Sidebar (for example with Enter), focus stays in Sidebar.
+  The TUI enables crossterm focus reporting and caches the focused peer on mouse approach /
+  FocusLost; a non-preview click or normal Sidebar key input clears a stale peer. Herdr queues
+  a pane's mouse press before its FocusGained sequence, so a direct click can open Preview
+  without losing the cached return target. A closed/missing target simply leaves Sidebar focused.
 - Clicking a changed file in Source Control (or `o`, or the context menu's Open Diff)
   shows its colored `git diff` in the SAME preview surface the explorer uses: the control
   file carries typed requests (`file` / `diff` / immutable `refdiff`, tab-separated),

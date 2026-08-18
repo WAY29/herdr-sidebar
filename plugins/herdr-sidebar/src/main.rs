@@ -13,7 +13,10 @@ mod scm_app;
 use std::io::Read;
 use std::time::Duration;
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
+    MouseEventKind,
+};
 use herdr_sidebar::{launch, state, viewer};
 use state::{Exit, View};
 
@@ -100,7 +103,7 @@ fn main() -> std::io::Result<()> {
     // turns every pane we draw monochrome.
     crossterm::style::force_color_output(true);
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableFocusChange);
     // First run on a machine without a Nerd Font: offer to install one
     // before any icons render. The prompt stamps the pane's identity token
     // itself (the app loops haven't started yet, and a token-less pane gets
@@ -119,7 +122,7 @@ fn main() -> std::io::Result<()> {
             Err(e) => break Err(e),
         }
     };
-    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = crossterm::execute!(std::io::stdout(), DisableFocusChange, DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -159,9 +162,28 @@ fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit
                     preview.on_mouse(mouse);
                     None
                 }
-                Event::Key(key) => app.on_key(key),
-                Event::Mouse(mouse) => app.on_mouse(mouse),
-                _ => None, // resize, focus, … simply fall through to a redraw
+                Event::Key(key) => {
+                    preview.claim_focus();
+                    app.on_key(key)
+                }
+                Event::Mouse(mouse) => {
+                    preview.observe_mouse();
+                    let exit = app.on_mouse(mouse);
+                    preview.sync();
+                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        preview.claim_focus();
+                    }
+                    exit
+                }
+                Event::FocusGained => {
+                    preview.claim_focus();
+                    None
+                }
+                Event::FocusLost => {
+                    preview.on_focus_lost();
+                    None
+                }
+                _ => None, // resize simply falls through to a redraw
             };
             if let Some(exit) = exit {
                 return Ok(exit);
@@ -202,8 +224,27 @@ fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
                     preview.on_mouse(mouse);
                     None
                 }
-                Event::Key(key) => app.on_key(key),
-                Event::Mouse(mouse) => app.on_mouse(mouse),
+                Event::Key(key) => {
+                    preview.claim_focus();
+                    app.on_key(key)
+                }
+                Event::Mouse(mouse) => {
+                    preview.observe_mouse();
+                    let exit = app.on_mouse(mouse);
+                    preview.sync();
+                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        preview.claim_focus();
+                    }
+                    exit
+                }
+                Event::FocusGained => {
+                    preview.claim_focus();
+                    None
+                }
+                Event::FocusLost => {
+                    preview.on_focus_lost();
+                    None
+                }
                 _ => None,
             };
             if let Some(exit) = exit {
