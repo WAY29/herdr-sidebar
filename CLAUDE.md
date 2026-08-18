@@ -448,7 +448,10 @@ HACKING.md — budget time for that before promising a patched build.
   with its full repo-relative path and green `+N` / red `-N` (directories aggregate descendants),
   omitting zero sides without shifting the row. `draw_list` re-hit-tests the saved mouse position
   every frame because a Git refresh rebuilds/clears row hover while a stationary pointer emits no
-  new `Moved` event. Untracked regular text files are counted directly up to 1 MiB each and 8 MiB
+  new `Moved` event. FocusLost clears the saved position so clicking/focusing another pane removes
+  the tooltip immediately; merely moving across panes still has no leave signal from herdr and can
+  leave it visible until the pointer re-enters Sidebar. Untracked regular text files are counted
+  directly up to 1 MiB each and 8 MiB
   total per refresh;
   larger files, symlinks, binary files, submodules, and unknown numstat values omit counters.
   Rename trees use the new path and

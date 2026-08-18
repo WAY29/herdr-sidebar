@@ -1339,6 +1339,13 @@ impl App {
         None
     }
 
+    pub fn on_focus_lost(&mut self) {
+        self.hovered = None;
+        self.mouse_pos = None;
+        self.last_mouse = None;
+        self.title_zones.clear();
+    }
+
     fn left_click(&mut self, mouse: MouseEvent) -> Option<Exit> {
         self.flash = None;
         if hits_collapse_button(mouse.column, mouse.row, self.last_width, self.last_height) {

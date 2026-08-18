@@ -242,6 +242,7 @@ fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
                     None
                 }
                 Event::FocusLost => {
+                    app.on_focus_lost();
                     preview.on_focus_lost();
                     None
                 }
