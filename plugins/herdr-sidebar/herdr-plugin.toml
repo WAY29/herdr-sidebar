@@ -27,14 +27,31 @@ platforms = ["linux", "macos", "windows"]
 [[build]]
 command = ["cargo", "build", "--release"]
 
-# Declarative pane entry — usable on linux/macos (`plugin pane open`) and as
-# the unix launcher's fallback. No Windows [[panes]] entry: the relative
-# command is unspawnable there.
+# Declarative pane entries — linux/macos launch them directly with
+# `plugin pane open`, so no interactive shell command is ever visible. The
+# requested pane cwd is the workspace root, so resolve the binary through the
+# host-injected plugin root instead of a relative command. No Windows
+# [[panes]] entries: Windows keeps the absolute-path sidecar launchers below.
 [[panes]]
 id = "sidebar"
+platforms = ["linux", "macos"]
 title = "Sidebar"
 placement = "split"
-command = ["./target/release/herdr-sidebar"]
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-sidebar"']
+
+[[panes]]
+id = "explorer"
+platforms = ["linux", "macos"]
+title = "Explorer"
+placement = "split"
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-sidebar" --view explorer']
+
+[[panes]]
+id = "git"
+platforms = ["linux", "macos"]
+title = "Source Control"
+placement = "split"
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-sidebar" --view git']
 
 # Toggle the sidebar: open left-docked / focus if unfocused / close if focused.
 [[actions]]

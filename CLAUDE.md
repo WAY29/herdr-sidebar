@@ -358,6 +358,12 @@ HACKING.md — budget time for that before promising a patched build.
 - Both views ship in ONE binary: the activity bar switches them **in process** (instant,
   no flash — the terminal session is held across switches). The old two-crate host/guest
   process-swap protocol is gone.
+- Unix toggle/ensure launchers and the separated-pane path open the manifest entrypoint through
+  `plugin.pane.open`, then apply the existing swap/resize/focus steps. Do not regress them to
+  `pane.split` + `pane.send_input`: that exposes the interactive shell prompt and launch command
+  during reload. The manifest commands use `sh -c 'exec "$HERDR_PLUGIN_ROOT/…"'` because the
+  requested pane cwd is the workspace root and herdr 0.8 does not expand `{{plugin.root}}`.
+  Windows retains its absolute-path sidecar launch path.
 - Unified Sidebar panes with the SAME canonical root mirror their visual state across tabs in
   one workspace through replace-on-write files under `state-dir/workspace-sync/`. The shared state uses
   semantic anchors, not row indices: active Explorer/SCM view, selected/top path or SCM row,

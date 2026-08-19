@@ -57,14 +57,19 @@ if [ -n "$plan" ]; then
   ratio="${plan#*	}"
 fi
 
-out="$("$herdr_bin" pane split "$target" --direction right --ratio "$ratio" \
+out="$("$herdr_bin" plugin pane open --plugin herdr-sidebar \
+  --entrypoint sidebar --placement split --target-pane "$target" --direction right \
   ${fcwd:+--cwd "$fcwd"} --no-focus 2>/dev/null || true)"
 np="$(printf '%s' "$out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
 [ -n "$np" ] || exit 0
 
+# Direct manifest argv launch avoids exposing a shell prompt/command. Restore
+# the open-plan share after plugin pane open's default 50/50 split.
 "$herdr_bin" pane swap --source-pane "$np" --target-pane "$target" >/dev/null 2>&1 || true
-"$herdr_bin" pane run "$np" "exec \"$bin\""
-"$herdr_bin" pane rename "$np" Explorer >/dev/null 2>&1 || true
+amount="$(awk -v ratio="$ratio" 'BEGIN { d = 0.5 - ratio; if (d > 0.000001) printf "%.6f", d }')"
+if [ -n "$amount" ]; then
+  "$herdr_bin" pane resize --pane "$np" --direction left --amount "$amount" >/dev/null 2>&1 || true
+fi
 
 # Hand focus back if the swap left it on the explorer (focus follows the slot).
 if [ "$target" = "$fid" ]; then

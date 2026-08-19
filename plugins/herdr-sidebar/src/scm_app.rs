@@ -2912,37 +2912,56 @@ impl App {
 
     /// Open the other view in a fresh pane beside this one (detach).
     fn spawn_other_pane(&self) {
-        let (Some(ctl), Some(exe)) = (&self.pane_ctl, &self.other_exe) else { return };
+        let Some(ctl) = &self.pane_ctl else { return };
         // Grow to double width FIRST, then split 50/50 — each separated panel
         // keeps the width the unified sidebar had, instead of halving.
         ctl.resize_to(self.last_width, self.last_width.saturating_mul(2).saturating_add(1));
-        let response = herdr_sidebar::ipc::call_text(
-            "pane.split",
-            serde_json::json!({
-                "target_pane_id": ctl.pane_id,
-                "direction": "right",
-                "ratio": 0.5,
-                "focus": false,
-                "cwd": self.cwd.display().to_string(),
-                "env": sidebar::spawn_env(),
-            }),
-        );
-        let Some(new_pane) = response.ok().and_then(|r| herdr_sidebar::launch::split_pane_id(&r)) else {
-            return;
-        };
-        let flag = MY_VIEW.other().view_flag();
-        #[cfg(windows)]
-        let command = format!("& \"{}\" --view {flag}", exe.display());
         #[cfg(not(windows))]
-        let command = format!("exec \"{}\" --view {flag}", exe.display());
-        let _ = herdr_sidebar::ipc::call_text(
-            "pane.send_input",
-            serde_json::json!({ "pane_id": new_pane, "text": command, "keys": ["Enter"] }),
-        );
-        let _ = herdr_sidebar::ipc::call_text(
-            "pane.rename",
-            serde_json::json!({ "pane_id": new_pane, "label": MY_VIEW.other().label() }),
-        );
+        {
+            let _ = herdr_sidebar::ipc::call_text(
+                "plugin.pane.open",
+                serde_json::json!({
+                    "plugin_id": "herdr-sidebar",
+                    "entrypoint": "explorer",
+                    "placement": "split",
+                    "target_pane_id": ctl.pane_id,
+                    "direction": "right",
+                    "focus": false,
+                    "cwd": self.cwd.display().to_string(),
+                    "env": sidebar::spawn_env(),
+                }),
+            );
+        }
+        #[cfg(windows)]
+        {
+            let Some(exe) = &self.other_exe else { return };
+            let response = herdr_sidebar::ipc::call_text(
+                "pane.split",
+                serde_json::json!({
+                    "target_pane_id": ctl.pane_id,
+                    "direction": "right",
+                    "ratio": 0.5,
+                    "focus": false,
+                    "cwd": self.cwd.display().to_string(),
+                    "env": sidebar::spawn_env(),
+                }),
+            );
+            let Some(new_pane) =
+                response.ok().and_then(|r| herdr_sidebar::launch::split_pane_id(&r))
+            else {
+                return;
+            };
+            let flag = MY_VIEW.other().view_flag();
+            let command = format!("& \"{}\" --view {flag}", exe.display());
+            let _ = herdr_sidebar::ipc::call_text(
+                "pane.send_input",
+                serde_json::json!({ "pane_id": new_pane, "text": command, "keys": ["Enter"] }),
+            );
+            let _ = herdr_sidebar::ipc::call_text(
+                "pane.rename",
+                serde_json::json!({ "pane_id": new_pane, "label": MY_VIEW.other().label() }),
+            );
+        }
     }
 
     // ---- Git operations ----

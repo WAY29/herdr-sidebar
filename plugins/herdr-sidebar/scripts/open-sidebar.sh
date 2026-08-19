@@ -55,13 +55,14 @@ trap 'rmdir "$lock_dir" 2>/dev/null' EXIT
 panes="$("$herdr_bin" pane list 2>/dev/null || true)"
 
 open_pane() {
-  local fp fid fcwd plan target ratio out np
+  local fp fid fcwd plan target ratio amount out np
   fp="$(printf '%s' "$panes" | "$bin" --focused-pane 2>/dev/null || true)"
   fid="${fp%%	*}"
   fcwd="${fp#*	}"
   if [ -z "$fid" ]; then
     "$herdr_bin" plugin pane open --plugin herdr-sidebar \
-      --entrypoint filetree --placement split --direction right --focus
+      --entrypoint sidebar --placement split --direction right --focus
+    return
   fi
 
   target="$fid"
@@ -72,15 +73,20 @@ open_pane() {
     ratio="${plan#*	}"
   fi
 
-  out="$("$herdr_bin" pane split "$target" --direction right --ratio "$ratio" \
+  out="$("$herdr_bin" plugin pane open --plugin herdr-sidebar \
+    --entrypoint sidebar --placement split --target-pane "$target" --direction right \
     ${fcwd:+--cwd "$fcwd"} --no-focus 2>/dev/null || true)"
   np="$(printf '%s' "$out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
   [ -n "$np" ] || exit 1
 
-  # Move the new pane into the left slot, then start the explorer in it.
+  # plugin pane open starts the manifest argv directly: there is no shell
+  # prompt or launch command to flash. Its split starts 50/50, so restore the
+  # planned left-slot share after swapping the Sidebar into that slot.
   "$herdr_bin" pane swap --source-pane "$np" --target-pane "$target" >/dev/null 2>&1 || true
-  "$herdr_bin" pane run "$np" "exec \"$bin\""
-  "$herdr_bin" pane rename "$np" Explorer >/dev/null 2>&1 || true
+  amount="$(awk -v ratio="$ratio" 'BEGIN { d = 0.5 - ratio; if (d > 0.000001) printf "%.6f", d }')"
+  if [ -n "$amount" ]; then
+    "$herdr_bin" pane resize --pane "$np" --direction left --amount "$amount" >/dev/null 2>&1 || true
+  fi
   # Give the TUI time to stamp its identity token before hooks re-check.
   sleep 3
   # herdr has no focus-by-id; a zoom on/off cycle focuses deterministically.
