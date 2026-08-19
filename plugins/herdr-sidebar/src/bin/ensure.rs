@@ -5,6 +5,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--quick-open") {
+        let _ = herdr_sidebar::ensure::open_quick();
+        return;
+    }
     let toggle = std::env::args().any(|arg| arg == "--toggle");
     // Errors are deliberately silent: there is no console to print to, herdr
     // logs the exit, and the next focus event retries anyway.

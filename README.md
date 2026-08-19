@@ -4,10 +4,10 @@
 
 ### The sidebar your terminal was missing — inspired by VS Code.
 
-A file explorer, VS Code-style full-text search, and a full source-control panel in one
-dockable [herdr](https://github.com/herdrdev/herdr) pane — activity-bar switching, mouse
-everywhere, AI-drafted commit messages, and a file preview that takes everything beside
-the sidebar until Esc puts your panes back.
+A file explorer, VS Code-style full-text search, Quick Open, and a full source-control panel
+in one dockable [herdr](https://github.com/herdrdev/herdr) pane — activity-bar switching,
+mouse everywhere, AI-drafted commit messages, and a file preview that takes everything
+beside the sidebar until Esc puts your panes back.
 
 <img alt="Rust" src="https://img.shields.io/badge/Rust-self--contained_crate-orange?logo=rust&logoColor=white">
 <img alt="herdr" src="https://img.shields.io/badge/herdr-%E2%89%A5%200.7-5865a3">
@@ -82,6 +82,14 @@ VS Code-style project search without leaving the Sidebar:
 
 Search is part of the unified Sidebar. Separated mode keeps Explorer and Source Control as the
 two independent panes.
+
+### Quick Open
+
+Invoke the Quick Open action to show a centered popup over the current tab. It indexes the
+current Sidebar root with `rg --files`, then fuzzy-matches file and folder names as you type.
+Choosing a result switches the Sidebar to Explorer, expands every parent folder, and selects
+the target; files also open in the existing in-process Preview. If `rg` is unavailable, the
+popup shows the same Retry screen as Search.
 
 ### 🔀 Source Control
 
@@ -159,8 +167,8 @@ herdr plugin action invoke herdr-sidebar.open-sidebar           # linux / macos
 ```
 
 **Requirements:** Rust to build and herdr ≥ 0.7. Search additionally requires
-[`ripgrep`](https://github.com/BurntSushi/ripgrep) (`rg`) on `PATH`; the Search view shows a
-Retry screen when it is unavailable. **Recommended:** a Nerd Font terminal face for the
+[`ripgrep`](https://github.com/BurntSushi/ripgrep) (`rg`) on `PATH`; Search and Quick Open show
+a Retry screen when it is unavailable. **Recommended:** a Nerd Font terminal face for the
 material icons — without one the sidebar auto-starts in its emoji theme, which renders in
 any font. Note Windows Terminal's bundled Cascadia does NOT include the icon glyphs; grab a
 patched font in one command and select it in your terminal profile:
@@ -174,6 +182,20 @@ CaskaydiaCove). Also recommended: the
 [`claude` CLI](https://claude.com/claude-code) for ✧ commit messages.
 
 ## Keys
+
+Herdr plugins cannot declare global default keybindings in their manifest. To use VS Code's
+`F1` binding for Quick Open, add the matching entry to your Herdr `config.toml`:
+
+```toml
+[[keys.command]]
+key = "f1"
+type = "plugin_action"
+command = "herdr-sidebar.quick-open" # linux / macos
+description = "Quick Open"
+```
+
+On Windows, use `command = "herdr-sidebar.quick-open-windows"` instead. This is a direct
+global binding, so it works regardless of which pane owns focus.
 
 In unified mode, `1`, `2`, and `3` switch to Explorer, Source Control, and Search. `s` opens
 Settings and `b` hides the Sidebar when focus is not inside a Search text field.
@@ -218,6 +240,7 @@ Settings and `b` hides the Sidebar when focus is not inside a Search text field.
 | Action | What it does |
 |---|---|
 | `open-sidebar` / `open-sidebar-windows` | Toggle the sidebar: open left-docked / focus / close |
+| `quick-open` / `quick-open-windows` | Open the centered file/folder palette for the current Sidebar root |
 | `open-git` / `open-git-windows` | Toggle a separate Source Control pane (separated mode) |
 | `redeploy` / `redeploy-windows` | After a rebuild: replace old Sidebar panes; other workspaces re-dock on next focus |
 

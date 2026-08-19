@@ -99,6 +99,23 @@ pub fn run(toggle: bool) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn open_quick() -> std::io::Result<()> {
+    let entrypoint = if cfg!(windows) {
+        "quick-open-windows"
+    } else {
+        "quick-open"
+    };
+    ipc::call_text(
+        "plugin.pane.open",
+        serde_json::json!({
+            "plugin_id": "herdr-sidebar",
+            "entrypoint": entrypoint,
+            "focus": true,
+        }),
+    )?;
+    Ok(())
+}
+
 fn focus(pane_id: &str) -> std::io::Result<()> {
     // The API has focus-by-id (`pane.focus`), unlike the CLI's zoom-cycle hack.
     ipc::call_text("pane.focus", serde_json::json!({ "pane_id": pane_id }))?;

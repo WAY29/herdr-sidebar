@@ -1146,7 +1146,7 @@ impl InlinePreview {
         self.last_refresh = Instant::now();
     }
 
-    fn close(&mut self) {
+    pub fn close(&mut self) {
         if !self.is_open() {
             return;
         }

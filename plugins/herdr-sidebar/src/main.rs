@@ -8,6 +8,7 @@
 //! launch.rs.
 
 mod explorer_app;
+mod quick_open;
 mod search_app;
 mod scm_app;
 
@@ -65,11 +66,12 @@ fn main() -> std::io::Result<()> {
             };
             return viewer::run(std::path::Path::new(&control));
         }
+        Some("--quick-open") => return quick_open::run(),
         Some("--view") => {}
         Some(other) => {
             eprintln!("herdr-sidebar: unknown argument `{other}`");
             eprintln!(
-                "usage: herdr-sidebar [--view explorer|git|search|--preview <ctl>|--launch-decision [git]|--focused-pane|--open-plan|--focused-tab|--auto-open]"
+                "usage: herdr-sidebar [--view explorer|git|search|--quick-open|--preview <ctl>|--launch-decision [git]|--focused-pane|--open-plan|--focused-tab|--auto-open]"
             );
             std::process::exit(2);
         }
@@ -126,11 +128,12 @@ fn main() -> std::io::Result<()> {
     // itself (the app loops haven't started yet, and a token-less pane gets
     // REPLACE-killed by the corpse rule while the user reads the prompt).
     herdr_sidebar::fontsetup::maybe_prompt(&mut terminal, view, persisted.merged)?;
+    let mut quick_open = quick_open::Inbox::for_current_pane();
     let result = loop {
         let exit = match view {
-            View::Explorer => run_explorer(&mut terminal, &mut sync),
-            View::SourceControl => run_scm(&mut terminal, &mut sync),
-            View::Search => run_search(&mut terminal, &mut sync),
+            View::Explorer => run_explorer(&mut terminal, &mut sync, &mut quick_open),
+            View::SourceControl => run_scm(&mut terminal, &mut sync, &mut quick_open),
+            View::Search => run_search(&mut terminal, &mut sync, &mut quick_open),
         };
         match exit {
             Ok(Exit::Quit) => break Ok(()),
@@ -160,6 +163,7 @@ fn read_stdin() -> std::io::Result<String> {
 fn run_explorer(
     terminal: &mut ratatui::DefaultTerminal,
     sync: &mut Option<SyncSession>,
+    quick_open: &mut quick_open::Inbox,
 ) -> std::io::Result<Exit> {
     let root = std::env::current_dir()?;
     let mut app = explorer_app::App::new(root);
@@ -183,6 +187,22 @@ fn run_explorer(
     }
     loop {
         configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+        preview.sync();
+        if let Some(request) = quick_open.take() {
+            if request.is_dir {
+                preview.close();
+            }
+            if app.reveal_quick_open(&request.root, &request.path, request.is_dir)
+                && let Some(session) = sync.as_mut()
+            {
+                session.set_root(&app.root());
+                session.publish_explorer(
+                    View::Explorer,
+                    app.workspace_width(),
+                    app.workspace_state(),
+                );
+            }
+        }
         if let Some(session) = sync.as_mut() {
             session.set_unified(app.workspace_sync_enabled());
             session.set_root(&app.root());
@@ -322,6 +342,7 @@ fn run_explorer(
 fn run_scm(
     terminal: &mut ratatui::DefaultTerminal,
     sync: &mut Option<SyncSession>,
+    quick_open: &mut quick_open::Inbox,
 ) -> std::io::Result<Exit> {
     let cwd = std::env::current_dir()?;
     let mut app = scm_app::App::new(cwd);
@@ -346,6 +367,10 @@ fn run_scm(
     }
     loop {
         configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+        if quick_open.poll() {
+            switch_to_quick_open_explorer(sync, app.workspace_width());
+            return Ok(Exit::Switch);
+        }
         if let Some(session) = sync.as_mut() {
             session.set_unified(app.workspace_sync_enabled());
             session.set_root(&app.root());
@@ -487,6 +512,7 @@ fn run_scm(
 fn run_search(
     terminal: &mut ratatui::DefaultTerminal,
     sync: &mut Option<SyncSession>,
+    quick_open: &mut quick_open::Inbox,
 ) -> std::io::Result<Exit> {
     let cwd = std::env::current_dir()?;
     let mut app = search_app::App::new(cwd);
@@ -510,6 +536,10 @@ fn run_search(
     }
     loop {
         configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+        if quick_open.poll() {
+            switch_to_quick_open_explorer(sync, app.workspace_width());
+            return Ok(Exit::Switch);
+        }
         if let Some(session) = sync.as_mut() {
             session.set_unified(app.workspace_sync_enabled());
             session.set_root(&app.root());
@@ -662,5 +692,14 @@ fn configure_sync(sync: &mut Option<SyncSession>, root: &std::path::Path, enable
         }
     } else if let Some(mut session) = sync.take() {
         session.set_unified(false);
+    }
+}
+
+fn switch_to_quick_open_explorer(sync: &mut Option<SyncSession>, width: u16) {
+    let mut sidebar_state = state::load_state();
+    sidebar_state.active = View::Explorer;
+    state::save_state(sidebar_state);
+    if let Some(session) = sync.as_mut() {
+        session.publish_active(View::Explorer, width);
     }
 }

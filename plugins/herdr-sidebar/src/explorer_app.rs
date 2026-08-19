@@ -86,6 +86,13 @@ impl PaneCtl {
             }),
         );
     }
+
+    fn focus(&self) {
+        let _ = herdr_sidebar::ipc::call_text(
+            "pane.focus",
+            serde_json::json!({ "pane_id": self.pane_id }),
+        );
+    }
 }
 
 /// Where the tree body was drawn last frame, for mouse hit-testing.
@@ -358,6 +365,59 @@ impl App {
 
     pub fn workspace_sync_enabled(&self) -> bool {
         self.merged()
+    }
+
+    pub fn reveal_quick_open(&mut self, request_root: &Path, relative: &Path, is_dir: bool) -> bool {
+        let root = self.tree.root_path();
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        let canonical_request =
+            std::fs::canonicalize(request_root).unwrap_or_else(|_| request_root.to_path_buf());
+        if canonical_root != canonical_request
+            || relative.as_os_str().is_empty()
+            || !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            self.notice = Some("Quick Open target is outside this Explorer root".into());
+            return false;
+        }
+        let target = root.join(relative);
+        let Ok(metadata) = std::fs::metadata(&target) else {
+            self.notice = Some("Quick Open target no longer exists".into());
+            return false;
+        };
+        let actual_is_dir = metadata.is_dir();
+        let mut current = root.clone();
+        let reveal = if actual_is_dir {
+            relative
+        } else {
+            relative.parent().unwrap_or_else(|| Path::new(""))
+        };
+        for component in reveal.components() {
+            current.push(component.as_os_str());
+            self.tree.expand(&current);
+        }
+        if is_dir && actual_is_dir {
+            self.tree.expand(&target);
+        }
+        self.tree.refresh();
+        self.rows = self.tree.rows();
+        let Some(index) = self.rows.iter().position(|row| row.path == target) else {
+            self.notice = Some("Quick Open target is hidden by Explorer filters".into());
+            return false;
+        };
+        self.overlay = None;
+        self.selected = Some(index);
+        self.scroll = index.saturating_sub(self.page / 3);
+        self.snap = true;
+        self.hovered = None;
+        if let Some(ctl) = &self.pane_ctl {
+            ctl.focus();
+        }
+        if !actual_is_dir {
+            self.open_preview(&target);
+        }
+        true
     }
 
     pub fn apply_workspace_width(&self, width: u16) {

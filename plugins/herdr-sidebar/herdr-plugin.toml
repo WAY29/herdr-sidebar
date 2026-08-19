@@ -53,6 +53,29 @@ title = "Source Control"
 placement = "split"
 command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-sidebar" --view git']
 
+[[panes]]
+id = "quick-open"
+platforms = ["linux", "macos"]
+title = "Quick Open"
+description = "Fuzzy-search files and folders in the current Sidebar root."
+placement = "popup"
+width = "80%"
+height = "72%"
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-sidebar" --quick-open']
+
+[[panes]]
+id = "quick-open-windows"
+platforms = ["windows"]
+title = "Quick Open"
+description = "Fuzzy-search files and folders in the current Sidebar root."
+placement = "popup"
+width = "80%"
+height = "72%"
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  '& "$env:HERDR_PLUGIN_ROOT\\target\\release\\herdr-sidebar.exe" --quick-open',
+]
+
 # Toggle the sidebar: open left-docked / focus if unfocused / close if focused.
 [[actions]]
 id = "open-sidebar"
@@ -67,6 +90,20 @@ platforms = ["windows"]
 title = "Toggle sidebar"
 description = "Open the sidebar docked on the left (focus it if open; close it if focused)."
 command = ["wscript", "//B", "scripts/launch-ensure.vbs", "--toggle"]
+
+[[actions]]
+id = "quick-open"
+platforms = ["linux", "macos"]
+title = "Quick Open"
+description = "Fuzzy-search files and folders in the current Sidebar root."
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-sidebar-ensure" --quick-open']
+
+[[actions]]
+id = "quick-open-windows"
+platforms = ["windows"]
+title = "Quick Open"
+description = "Fuzzy-search files and folders in the current Sidebar root."
+command = ["wscript", "//B", "scripts/launch-ensure.vbs", "--quick-open"]
 
 # Separated-panels mode: open the Source Control pane on its own (the ⚙
 # settings' "Unified sidebar: off"). The explorer side is what the sidebar

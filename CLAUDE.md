@@ -155,6 +155,12 @@ Pane geometry & CLI semantics:
   and plain characters work, but `Home` is rejected with `invalid_key` and
   `PageDown`/`PgDn`/`page-down`/`pgdn` are all rejected as unsupported too. Give TUIs
   single-char fallbacks (`g`/`G` for Home/End) so they stay drivable via send-keys.
+- **Kitty 0.44 emits compact CSI for F1 under Herdr's keyboard flags**: with flags 7
+  (disambiguate Esc + event types + alternate keys), F1 press/release are `CSI P` and
+  `CSI 1;1:3 P`. Enabling report-all (flags 15) moves ordinary text keys to CSI-u but
+  still leaves F1 in this legacy form. Therefore mapping Kitty functional codepoint 57364
+  (`CSI 57364;...u`, as in herdr PR #2378) is not sufficient for Kitty; Herdr's raw parser
+  must also accept bare `CSI P/Q/R/S` for F1-F4.
 - A `pane list` snapshot goes stale the moment you `pane close` a pane: if the closed pane
   was the focused one, the old snapshot still reports it as focused, so deriving a
   split/layout target from it yields `pane_not_found`. Re-run `pane list` AFTER any close
@@ -301,7 +307,10 @@ Terminal fonts for icon glyphs (Windows, verified live):
 Building herdr itself from source (for local patches): needs Zig ≥ 0.15.2 on PATH or via
 `ZIG=<path>` (build.rs compiles the vendored `libghostty-vt`); the 0.15.2 zig build failed on
 this machine with the known Zig-0.15-Windows linking issue mentioned in libghostty's
-HACKING.md — budget time for that before promising a patched build.
+HACKING.md — budget time for that before promising a patched build. On macOS, Zig 0.15's
+HTTP client returned 400 for every `deps.files.ghostty.org` package through the local
+`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`; unset both lowercase and uppercase proxy vars for
+the build (direct downloads work) rather than changing `build.zig.zon`.
 
 ### Terminal/TUI gotchas (both plugins)
 
@@ -373,6 +382,17 @@ HACKING.md — budget time for that before promising a patched build.
   relative to the root), regex/case/whole-word toggles, grouped streaming results, and
   an error view with `Retry` when `rg` is missing. Search INPUTS sync across same-root
   unified tabs via `workspace_sync::SearchState`; results stay tab-local.
+- **Quick Open** is a separate centered Herdr popup (`--quick-open`) launched through
+  `plugin.pane.open`. It indexes the current tab's live Explorer root with `rg --files`, derives
+  non-empty directory results from those file paths, and sends the selected relative path through
+  an atomic per-pane mailbox under `state-dir/quick-open/`. The target Sidebar switches to
+  Explorer, expands every parent, selects the path, and opens files in the existing in-process
+  Preview. Herdr plugin manifests cannot declare global default keybindings, so the recommended
+  `F1` binding is a user `[[keys.command]]` entry with `type = "plugin_action"`.
+  The open action cannot be a plugin-side toggle for an arbitrary user binding: while a popup is
+  active, Herdr forwards its input before direct custom-command dispatch, so the same key reaches
+  Quick Open instead of invoking the action again. Keep `Esc` as the portable close path; never
+  hard-code `F1` or parse the user's Herdr keymap inside the popup.
 - Unix toggle/ensure launchers and the separated-pane path open the manifest entrypoint through
   `plugin.pane.open`, then apply the existing swap/resize/focus steps. Do not regress them to
   `pane.split` + `pane.send_input`: that exposes the interactive shell prompt and launch command
