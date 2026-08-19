@@ -3879,6 +3879,7 @@ impl App {
                             kind,
                             &self.drawers[kind.index()].lines[i],
                             expandable.then_some(expanded),
+                            width,
                         )
                     }
                     Row::Staged(r, i) => change_tree_item(
@@ -4190,6 +4191,10 @@ fn inline_field_width(pane_width: u16) -> u16 {
     pane_width.saturating_sub(2 + 3)
 }
 
+fn inline_sparkle(theme: IconTheme) -> String {
+    format!(" {} ", sparkle_icon(theme))
+}
+
 /// Width-aware commit placeholder: drop detail rather than clipping
 /// mid-word when the pane is narrow.
 fn message_placeholder(branch: &str, width: usize) -> String {
@@ -4255,7 +4260,7 @@ fn message_box_item(
             Span::styled("│", border),
             Span::styled(placeholder, Style::default().dim().italic()),
             Span::raw(" ".repeat(pad)),
-            Span::raw(format!("{} ", sparkle_icon(theme))),
+            Span::raw(inline_sparkle(theme)),
             Span::styled("│", border),
         ]));
     } else {
@@ -4265,7 +4270,7 @@ fn message_box_item(
             let pad = field.saturating_sub(Span::raw(row.as_str()).width());
             // The ✧ button owns the 3-column tail of the FIRST line only.
             let tail = if i == 0 {
-                Span::raw(format!("{} ", sparkle_icon(theme)))
+                Span::raw(inline_sparkle(theme))
             } else {
                 Span::raw("   ".to_string())
             };
@@ -4282,8 +4287,7 @@ fn message_box_item(
     ListItem::new(lines)
 }
 
-/// A repo's inline ✓ Commit button with the VS Code dropdown chevron at its
-/// right end; only the active repo's button is fully lit.
+/// A repo's inline ✓ Commit button; only the active repo's button is fully lit.
 fn commit_button_item(active: bool, focused: bool, width: usize) -> ListItem<'static> {
     let (bg, fg) = match (active, focused) {
         (true, true) => (BUTTON_BLUE_FOCUS, Color::White),
@@ -4291,22 +4295,19 @@ fn commit_button_item(active: bool, focused: bool, width: usize) -> ListItem<'st
         (false, _) => (Color::Rgb(0x24, 0x45, 0x5c), Color::Rgb(0x9a, 0xb2, 0xc2)),
     };
     let label = "✓ Commit";
-    let body_w = width.saturating_sub(2);
-    let left_pad = body_w.saturating_sub(label.chars().count()) / 2;
-    let right_pad = body_w.saturating_sub(left_pad + label.chars().count());
+    let label_w = Span::raw(label).width();
+    let left_pad = width.saturating_sub(label_w) / 2;
+    let right_pad = width.saturating_sub(left_pad + label_w);
     let mut style = Style::default().bg(bg).fg(fg);
     if focused {
         style = style.add_modifier(Modifier::BOLD);
     }
     ListItem::new(vec![
         Line::default(),
-        Line::from(vec![
-            Span::styled(
-                format!("{}{label}{}", " ".repeat(left_pad), " ".repeat(right_pad)),
-                style,
-            ),
-            Span::styled("│∨", style.dim()),
-        ]),
+        Line::from(Span::styled(
+            format!("{}{label}{}", " ".repeat(left_pad), " ".repeat(right_pad)),
+            style,
+        )),
         Line::default(),
     ])
 }
@@ -4355,7 +4356,12 @@ fn file_history_header(collapsed: bool, file: &str) -> ListItem<'static> {
 
 /// One content line inside an expanded drawer. Branch lines highlight the
 /// current branch (git's `%(HEAD)` renders it as `* name`).
-fn drawer_line(kind: Drawer, text: &str, expanded: Option<bool>) -> ListItem<'static> {
+fn drawer_line(
+    kind: Drawer,
+    text: &str,
+    expanded: Option<bool>,
+    width: usize,
+) -> ListItem<'static> {
     let style = match kind {
         Drawer::Branches if text.starts_with('*') => {
             Style::default().fg(UNTRACKED).bold()
@@ -4366,7 +4372,10 @@ fn drawer_line(kind: Drawer, text: &str, expanded: Option<bool>) -> ListItem<'st
         || "   ".to_string(),
         |expanded| format!("   {} ", if expanded { '▾' } else { '▸' }),
     );
-    ListItem::new(Line::from(Span::styled(format!("{prefix}{text}"), style)))
+    ListItem::new(Line::from(Span::styled(
+        truncate_to(format!("{prefix}{text}"), width),
+        style,
+    )))
 }
 
 #[derive(Clone, Copy)]
@@ -4634,6 +4643,8 @@ fn change_tree_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn drawer_lines_parse_into_actionable_refs() {
@@ -4740,6 +4751,38 @@ mod tests {
         assert!(Drawer::Tags.supports_file_tree());
         assert!(!Drawer::Graph.supports_file_tree());
         assert!(!Drawer::FileHistory.supports_file_tree());
+    }
+
+    #[test]
+    fn multi_repo_widgets_and_drawer_lines_stay_inside_content_width() {
+        for theme in [IconTheme::Material, IconTheme::Emoji] {
+            let tail = inline_sparkle(theme);
+            assert_eq!(Span::raw(tail.as_str()).width(), 3);
+            assert_eq!(usize::from(inline_field_width(42)) + 2 + Span::raw(tail).width(), 42);
+        }
+
+        let backend = TestBackend::new(42, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    List::new(vec![commit_button_item(true, false, 42)]),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(41, 1)].symbol(), " ");
+        assert_eq!(buffer[(41, 1)].bg, BUTTON_BLUE);
+        assert!((0..42).all(|x| buffer[(x, 1)].symbol() != "∨"));
+
+        let item = drawer_line(
+            Drawer::Commits,
+            "d15aea93a feat(problem-bank): 支持题集权限关系和更多内容",
+            Some(false),
+            42,
+        );
+        assert!(item.width() <= 42);
     }
 
     #[test]

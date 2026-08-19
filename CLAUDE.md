@@ -431,7 +431,9 @@ HACKING.md — budget time for that before promising a patched build.
   views therefore window their rows manually (selected/scroll/snap fields) and render
   a plain List of the visible slice. When the scrollbar is present its last column is
   excluded from the list content width; right-edge actions render and hit-test against
-  that SAME reduced width, otherwise long-list clicks land on the row body instead.
+  that SAME reduced width, otherwise long-list clicks land on the row body instead. Every
+  one-line SCM drawer row must also be truncated to that reduced width before rendering:
+  relying on List clipping lets a final wide glyph occupy and visually erase the scrollbar cell.
   Explorer file/folder rows reserve their `⋯` menu cell even while hidden. SCM file-tree
   rows instead use that width for longer names until hovered, then truncate the name and
   restore the fixed right-edge menu/action/status hit zones.
