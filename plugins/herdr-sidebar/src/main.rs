@@ -272,6 +272,9 @@ fn run_explorer(
                 }
                 _ => None, // resize simply falls through to a redraw
             };
+            if app.take_redraw_request() {
+                terminal.clear()?;
+            }
             if let Some(exit) = exit {
                 if let Some(session) = sync.as_mut() {
                     session.set_root(&app.root());
@@ -426,6 +429,9 @@ fn run_scm(
                 }
                 _ => None,
             };
+            if app.take_redraw_request() {
+                terminal.clear()?;
+            }
             if let Some(exit) = exit {
                 if let Some(session) = sync.as_mut() {
                     session.set_root(&app.root());

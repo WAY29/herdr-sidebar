@@ -283,6 +283,25 @@ pub fn title_action_spans(
     (spans, zones)
 }
 
+/// Permanent hard-redraw button beside Settings. Unlike the hover Refresh
+/// action, this only clears ratatui's terminal cache so the next frame writes
+/// every cell again.
+pub fn redraw_button(
+    theme: IconTheme,
+    x: u16,
+    y: u16,
+    hover: Option<(u16, u16)>,
+) -> (Span<'static>, Rect) {
+    let chip = title_action_chip(theme, TitleAction::Refresh);
+    let rect = Rect::new(x, y, Span::raw(chip.as_str()).width() as u16, 1);
+    let style = if hover.is_some_and(|(hx, hy)| hits(rect, hx, hy)) {
+        Style::default().bg(KEYCAP_BG)
+    } else {
+        Style::default().dim()
+    };
+    (Span::styled(chip, style), rect)
+}
+
 pub fn within(x: u16, (start, end): (u16, u16)) -> bool {
     (start..end).contains(&x)
 }
@@ -535,5 +554,13 @@ mod tests {
         ]}}"#;
         let found = sibling_panes_of(json, "w1:p1", View::SourceControl);
         assert_eq!(found, ["w1:p2", "w1:p3"], "same tab only, label or token");
+    }
+
+    #[test]
+    fn redraw_button_has_a_stable_three_cell_zone() {
+        let (span, rect) = redraw_button(IconTheme::Material, 17, 4, None);
+        assert_eq!(span.content.as_ref(), " \u{eb37} ");
+        assert_eq!(span.width(), 3);
+        assert_eq!(rect, Rect::new(17, 4, 3, 1));
     }
 }

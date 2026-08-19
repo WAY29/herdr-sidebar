@@ -18,7 +18,7 @@ use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
     TitleAction, activity_icons, draw_option_picker, draw_scrollbar, gear_icon, hits,
-    hits_collapse_button, input_tail, option_picker_index, sibling_panes_of,
+    hits_collapse_button, input_tail, option_picker_index, redraw_button, sibling_panes_of,
     title_action_spans, title_actions_visible, title_actions_width, truncate_to,
     wrap_footer_message, wrap_hints,
 };
@@ -193,6 +193,9 @@ pub struct App {
     /// The ⚙ button's rect from the last draw (activity bar in unified mode,
     /// header row otherwise).
     gear: Rect,
+    /// The permanent hard-redraw button immediately left of Settings.
+    redraw: Rect,
+    redraw_requested: bool,
     /// The hover title-bar buttons' click zones from the last draw (empty
     /// while they are hidden).
     title_zones: Vec<(Rect, TitleAction)>,
@@ -268,6 +271,8 @@ impl App {
             other_exe,
             activity: ActivityZones::default(),
             gear: Rect::default(),
+            redraw: Rect::default(),
+            redraw_requested: false,
             title_zones: Vec::new(),
             last_mouse: None,
             mouse_pos: None,
@@ -344,6 +349,10 @@ impl App {
 
     pub fn workspace_width(&self) -> u16 {
         self.last_width
+    }
+
+    pub fn take_redraw_request(&mut self) -> bool {
+        std::mem::take(&mut self.redraw_requested)
     }
 
     pub fn workspace_sync_enabled(&self) -> bool {
@@ -563,6 +572,10 @@ impl App {
                     if (zones.source_control.0..zones.source_control.1).contains(&mouse.column) {
                         return self.switch_to(View::SourceControl);
                     }
+                }
+                if hits(self.redraw, mouse.column, mouse.row) {
+                    self.redraw_requested = true;
+                    return None;
                 }
                 let g = self.gear;
                 if mouse.column >= g.x
@@ -1563,6 +1576,7 @@ impl App {
             Span::styled(format!("{} ", gear_icon(self.theme)), Style::default().dim())
         });
         let gear_w = gear.as_ref().map(Span::width).unwrap_or(0) as u16;
+        let redraw_w = if gear.is_some() { 3 } else { 0 };
         self.title_zones.clear();
         let (action_spans, actions_w) = if title_actions_visible(self.last_mouse) {
             let actions = [
@@ -1572,7 +1586,7 @@ impl App {
                 TitleAction::CollapseAll,
             ];
             let w = title_actions_width(self.theme, &actions);
-            let ax = area.x + area.width.saturating_sub(gear_w + w);
+            let ax = area.x + area.width.saturating_sub(gear_w + redraw_w + w);
             let (spans, zones) =
                 title_action_spans(self.theme, &actions, ax, area.y, self.mouse_pos);
             self.title_zones = zones;
@@ -1581,14 +1595,25 @@ impl App {
             (Vec::new(), 0)
         };
         // The name yields to the buttons and gear in narrow panes.
-        let avail = usize::from(area.width.saturating_sub(gear_w + actions_w));
+        let avail = usize::from(area.width.saturating_sub(gear_w + redraw_w + actions_w));
         let root_label =
             truncate_to(format!(" {}", self.tree.root_name().to_uppercase()), avail);
         let name = Span::styled(root_label, Style::default().bold().fg(Color::LightBlue));
         let pad = usize::from(area.width)
-            .saturating_sub(name.width() + usize::from(actions_w) + usize::from(gear_w));
+            .saturating_sub(
+                name.width()
+                    + usize::from(actions_w)
+                    + usize::from(redraw_w)
+                    + usize::from(gear_w),
+            );
         let mut spans = vec![name, Span::raw(" ".repeat(pad))];
         spans.extend(action_spans);
+        if redraw_w > 0 {
+            let rx = area.x + area.width.saturating_sub(gear_w + redraw_w);
+            let (redraw, rect) = redraw_button(self.theme, rx, area.y, self.mouse_pos);
+            self.redraw = rect;
+            spans.push(redraw);
+        }
         if let Some(gear) = gear {
             let gx = area.x + area.width.saturating_sub(gear_w);
             self.gear = Rect::new(gx, area.y, gear_w, 1);
@@ -1721,11 +1746,18 @@ impl App {
         let gear_w = gear.width() as u16;
         let gear_x = area.x + area.width.saturating_sub(gear_w);
         self.gear = Rect::new(gear_x, area.y, gear_w, 1);
+        let redraw_x = gear_x.saturating_sub(3);
+        let (redraw, redraw_rect) =
+            redraw_button(self.theme, redraw_x, area.y, self.mouse_pos);
+        self.redraw = redraw_rect;
 
         let pad = usize::from(area.width)
-            .saturating_sub(spans.iter().map(Span::width).sum::<usize>() + usize::from(gear_w));
+            .saturating_sub(
+                spans.iter().map(Span::width).sum::<usize>() + 3 + usize::from(gear_w),
+            );
         let mut line = spans.to_vec();
         line.push(Span::raw(" ".repeat(pad)));
+        line.push(redraw);
         line.push(gear);
         frame.render_widget(Paragraph::new(Line::from(line)), area);
     }
@@ -1966,6 +1998,28 @@ mod tests {
         assert!(row_menu_hit(19, 20));
         assert!(!row_menu_hit(20, 20));
         assert_eq!(list_content_width(20, 21, 20), 19);
+    }
+
+    #[test]
+    fn redraw_button_requests_one_hard_redraw() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-redraw-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new_with_pane(root.clone(), None);
+        app.redraw = Rect::new(10, 2, 3, 1);
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+
+        assert!(app.take_redraw_request());
+        assert!(!app.take_redraw_request());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

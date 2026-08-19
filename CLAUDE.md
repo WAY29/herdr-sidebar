@@ -426,6 +426,14 @@ HACKING.md — budget time for that before promising a patched build.
   single-cell**, and a trailing slack cell pushes the glyph's right edge to the chip's
   center (user-reported live); the non-Mono build just overflows into the trailing space
   like the tree's file icons do.
+- A permanent refresh-glyph button sits immediately left of ⚙ in the unified activity bar
+  and both standalone headers. It uses the same theme-matched cod-refresh glyph as the
+  title actions, but is a HARD REDRAW rather than a data refresh: the main loop calls ratatui
+  `Terminal::clear()` so both the terminal backend and ratatui's previous-frame cache are
+  cleared, then the next frame rewrites the whole Sidebar (including an open in-process
+  Preview) without changing selection, overlays, Git/filesystem data, or shared workspace
+  state. Merely scheduling another draw is insufficient because ratatui otherwise emits
+  only cells that differ from its cached previous frame.
 
 ### Source Control view specifics (`src/scm_app.rs`)
 

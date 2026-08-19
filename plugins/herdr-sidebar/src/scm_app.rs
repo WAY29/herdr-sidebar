@@ -30,9 +30,9 @@ use herdr_sidebar::state::Exit;
 use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
     TitleAction, activity_icons, branch_icon, draw_option_picker, draw_scrollbar, gear_icon,
-    hits, hits_collapse_button, option_picker_index, sibling_panes_of, sparkle_icon,
-    title_action_spans, title_actions_visible, title_actions_width, truncate_to, within,
-    wrap_footer_message, wrap_hints,
+    hits, hits_collapse_button, option_picker_index, redraw_button, sibling_panes_of,
+    sparkle_icon, title_action_spans, title_actions_visible, title_actions_width, truncate_to,
+    within, wrap_footer_message, wrap_hints,
 };
 use herdr_sidebar::actions::{copy_to_clipboard, open_external, reveal};
 use herdr_sidebar::suggest;
@@ -690,6 +690,8 @@ struct ClickZones {
     source_control: (u16, u16),
     /// The ⚙ button (activity bar in unified mode, header otherwise).
     gear: Rect,
+    /// The permanent hard-redraw button immediately left of Settings.
+    redraw: Rect,
     message: Rect,
     sparkle: Rect,
     button: Rect,
@@ -785,6 +787,7 @@ pub struct App {
     hovered: Option<usize>,
     body: BodyGeom,
     zones: ClickZones,
+    redraw_requested: bool,
     /// The hover title-bar buttons' click zones from the last draw (empty
     /// while they are hidden).
     title_zones: Vec<(Rect, TitleAction)>,
@@ -855,6 +858,7 @@ impl App {
             hovered: None,
             body: BodyGeom::default(),
             zones: ClickZones::default(),
+            redraw_requested: false,
             title_zones: Vec::new(),
             last_mouse: None,
             mouse_pos: None,
@@ -1105,6 +1109,10 @@ impl App {
 
     pub fn workspace_width(&self) -> u16 {
         self.last_width
+    }
+
+    pub fn take_redraw_request(&mut self) -> bool {
+        std::mem::take(&mut self.redraw_requested)
     }
 
     pub fn workspace_sync_enabled(&self) -> bool {
@@ -1658,6 +1666,10 @@ impl App {
             if within(x, z.source_control) {
                 return self.switch_to(View::SourceControl);
             }
+        }
+        if hits(z.redraw, x, y) {
+            self.redraw_requested = true;
+            return None;
         }
         if hits(z.gear, x, y) {
             self.open_settings();
@@ -3486,11 +3498,18 @@ impl App {
         let gear_w = gear.width() as u16;
         let gear_x = area.x + area.width.saturating_sub(gear_w);
         self.zones.gear = Rect::new(gear_x, area.y, gear_w, 1);
+        let redraw_x = gear_x.saturating_sub(3);
+        let (redraw, redraw_rect) =
+            redraw_button(self.theme, redraw_x, area.y, self.mouse_pos);
+        self.zones.redraw = redraw_rect;
 
         let pad = usize::from(area.width)
-            .saturating_sub(spans.iter().map(Span::width).sum::<usize>() + usize::from(gear_w));
+            .saturating_sub(
+                spans.iter().map(Span::width).sum::<usize>() + 3 + usize::from(gear_w),
+            );
         let mut line = spans.to_vec();
         line.push(Span::raw(" ".repeat(pad)));
+        line.push(redraw);
         line.push(gear);
         frame.render_widget(Paragraph::new(Line::from(line)), area);
     }
@@ -3529,12 +3548,16 @@ impl App {
             Some(Span::styled(format!("{} ", gear_icon(self.theme)), Style::default().dim()))
         };
         let gear_w = gear.as_ref().map(Span::width).unwrap_or(0);
+        let redraw_w = if gear.is_some() { 3 } else { 0 };
         // The hover title-action buttons sit just left of the gear.
         self.title_zones.clear();
         let (action_spans, actions_w) = if title_actions_visible(self.last_mouse) {
             let actions = [TitleAction::Refresh, TitleAction::CollapseAll];
             let w = title_actions_width(self.theme, &actions);
-            let ax = area.x + area.width.saturating_sub(gear_w as u16 + w);
+            let ax = area.x
+                + area
+                    .width
+                    .saturating_sub(gear_w as u16 + redraw_w as u16 + w);
             let (spans, zones) =
                 title_action_spans(self.theme, &actions, ax, area.y, self.mouse_pos);
             self.title_zones = zones;
@@ -3544,14 +3567,23 @@ impl App {
         };
         // The branch text yields to the buttons and gear in narrow panes.
         let avail = (area.width as usize)
-            .saturating_sub(left.width() + actions_w + gear_w)
+            .saturating_sub(left.width() + actions_w + redraw_w + gear_w)
             .saturating_sub(1);
         let branch = Span::styled(truncate_to(right_text, avail), Style::default().dim());
         let pad = (area.width as usize)
-            .saturating_sub(left.width() + branch.width() + actions_w + gear_w)
+            .saturating_sub(left.width() + branch.width() + actions_w + redraw_w + gear_w)
             .max(1);
         let mut spans = vec![left, Span::raw(" ".repeat(pad)), branch];
         spans.extend(action_spans);
+        if redraw_w > 0 {
+            let rx = area.x
+                + area
+                    .width
+                    .saturating_sub(gear_w as u16 + redraw_w as u16);
+            let (redraw, rect) = redraw_button(self.theme, rx, area.y, self.mouse_pos);
+            self.zones.redraw = rect;
+            spans.push(redraw);
+        }
         if let Some(gear) = gear {
             let gx = area.x + area.width.saturating_sub(gear_w as u16);
             self.zones.gear = Rect::new(gx, area.y, gear_w as u16, 1);
