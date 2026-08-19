@@ -431,8 +431,9 @@ HACKING.md — budget time for that before promising a patched build.
   a plain List of the visible slice. When the scrollbar is present its last column is
   excluded from the list content width; right-edge actions render and hit-test against
   that SAME reduced width, otherwise long-list clicks land on the row body instead.
-  File/folder rows reserve their `⋯` menu cell even while hidden, so hover never shifts
-  the name or existing right-edge actions.
+  Explorer file/folder rows reserve their `⋯` menu cell even while hidden. SCM file-tree
+  rows instead use that width for longer names until hovered, then truncate the name and
+  restore the fixed right-edge menu/action/status hit zones.
 - **Search-result highlight ranges are BYTE offsets, not display widths**: `rg --json`
   submatches report UTF-8 byte spans into the line text. When the UI clips a long result
   line and prefixes it with `…`, shift the saved match spans by the ellipsis' UTF-8 byte
@@ -507,7 +508,9 @@ HACKING.md — budget time for that before promising a patched build.
   per-type menus (checkout / merge / cherry-pick / revert / reset / stash apply-pop-drop /
   fetch / delete / copy); destructive ones route through the generic `Overlay::ConfirmGit`
   y/N prompt. Hovered current-change rows show a `⋯` menu cell followed by the existing
-  `+`/`−` cell and status letter; historical file leaves reserve `⋯` before their status.
+  `+`/`−` cell and status letter; historical file leaves show `⋯` before their status only
+  while hovered. Hidden SCM buttons reserve no width, so file and directory names use the
+  full available row until hover reveals the actions.
   Left-clicking `⋯` opens the same menu as a forwarded right click without moving either
   existing tail cell. Section
   headers put the section-wide glyph immediately before the count badge; rendering and

@@ -477,8 +477,9 @@ fn change_tree_chevron_hit_at(x: u16, row: Option<&ChangeTreeRow>, base_indent: 
     )
 }
 
-fn change_tail_width(action_slot: bool) -> usize {
-    3 + usize::from(action_slot) * 3 + 2
+fn change_tail_width(action_slot: bool, buttons_visible: bool, status_slot: bool) -> usize {
+    usize::from(buttons_visible) * (3 + usize::from(action_slot) * 3)
+        + usize::from(status_slot) * 2
 }
 
 fn change_action_hit(x: u16, width: u16) -> bool {
@@ -487,7 +488,7 @@ fn change_action_hit(x: u16, width: u16) -> bool {
 }
 
 fn change_menu_hit(x: u16, width: u16, action_slot: bool) -> bool {
-    let start = width.saturating_sub(change_tail_width(action_slot) as u16);
+    let start = width.saturating_sub(change_tail_width(action_slot, true, true) as u16);
     x >= start && x < start.saturating_add(3)
 }
 
@@ -4508,6 +4509,7 @@ fn change_tree_item(
         ChangeTail::Status { action, menu } => (true, action, menu),
         ChangeTail::History { menu } => (false, None, menu),
     };
+    let buttons_visible = menu || action.is_some();
     let ChangeTreeRow::File { depth, .. } = row else {
         let ChangeTreeRow::Directory { name, depth, expanded, .. } = row else {
             unreachable!()
@@ -4521,13 +4523,18 @@ fn change_tree_item(
             " ".repeat(1 + base_indent + depth * 2),
             if *expanded { '▾' } else { '▸' }
         );
-        let tail_width = change_tail_width(action_slot);
+        // Live directory actions occupy the same columns as file actions while
+        // hovered, including the empty status slot that keeps hit zones aligned.
+        let status_slot = action_slot && buttons_visible;
+        let tail_width = change_tail_width(action_slot, buttons_visible, status_slot);
+        let gap = usize::from(tail_width > 0);
         let icon_text = format!("{} ", dir_icon.glyph);
         let name_width = width
             .saturating_sub(
                 Span::raw(prefix.as_str()).width()
                     + Span::raw(icon_text.as_str()).width()
-                    + tail_width,
+                    + tail_width
+                    + gap,
             )
             .max(1);
         let mut spans = vec![
@@ -4536,19 +4543,26 @@ fn change_tree_item(
             Span::raw(truncate_to(name.clone(), name_width)),
         ];
         let used = spans.iter().map(Span::width).sum::<usize>();
-        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + tail_width).max(1))));
-        spans.push(if menu {
-            Span::styled(" ⋯ ", Style::default().bold())
-        } else {
-            Span::raw("   ")
-        });
-        if action_slot {
-            spans.push(match action {
-                Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
-                None => Span::raw("   "),
-            });
+        let pad = width.saturating_sub(used + tail_width);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
         }
-        spans.push(Span::raw("  "));
+        if buttons_visible {
+            spans.push(if menu {
+                Span::styled(" ⋯ ", Style::default().bold())
+            } else {
+                Span::raw("   ")
+            });
+            if action_slot {
+                spans.push(match action {
+                    Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
+                    None => Span::raw("   "),
+                });
+            }
+        }
+        if status_slot {
+            spans.push(Span::raw("  "));
+        }
         return ListItem::new(Line::from(spans));
     };
     let Some(entry) = entry else { return ListItem::new("") };
@@ -4562,7 +4576,7 @@ fn change_tree_item(
         Some((r, g, b)) => Style::default().fg(Color::Rgb(r, g, b)),
         None => Style::default(),
     };
-    let tail_width = change_tail_width(action_slot);
+    let tail_width = change_tail_width(action_slot, buttons_visible, true);
     let wanted_indent = if tree_mode {
         3 + base_indent + depth * 2
     } else {
@@ -4599,16 +4613,18 @@ fn change_tree_item(
     let letter = Span::styled(entry.letter.to_string(), Style::default().fg(color).bold());
     let pad = width.saturating_sub(left_width + tail_width);
     spans.push(Span::raw(" ".repeat(pad)));
-    spans.push(if menu {
-        Span::styled(" ⋯ ", Style::default().bold())
-    } else {
-        Span::raw("   ")
-    });
-    if action_slot {
-        spans.push(match action {
-            Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
-            None => Span::raw("   "),
+    if buttons_visible {
+        spans.push(if menu {
+            Span::styled(" ⋯ ", Style::default().bold())
+        } else {
+            Span::raw("   ")
         });
+        if action_slot {
+            spans.push(match action {
+                Some(action) => Span::styled(format!(" {action} "), Style::default().bold()),
+                None => Span::raw("   "),
+            });
+        }
     }
     spans.push(letter);
     spans.push(Span::raw(" "));
@@ -4732,6 +4748,15 @@ mod tests {
         assert!(change_action_hit(35, 40));
         assert!(change_action_hit(37, 40));
         assert!(!change_action_hit(38, 40));
+    }
+
+    #[test]
+    fn change_rows_reserve_action_width_only_while_hovered() {
+        assert_eq!(change_tail_width(true, false, true), 2);
+        assert_eq!(change_tail_width(true, true, true), 8);
+        assert_eq!(change_tail_width(false, false, true), 2);
+        assert_eq!(change_tail_width(false, true, true), 5);
+        assert_eq!(change_tail_width(true, false, false), 0);
     }
 
     #[test]
