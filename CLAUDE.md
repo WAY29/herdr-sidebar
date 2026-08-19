@@ -358,6 +358,18 @@ HACKING.md — budget time for that before promising a patched build.
 - Both views ship in ONE binary: the activity bar switches them **in process** (instant,
   no flash — the terminal session is held across switches). The old two-crate host/guest
   process-swap protocol is gone.
+- Unified Sidebar panes with the SAME canonical root mirror their visual state across tabs in
+  one workspace through replace-on-write files under `state-dir/workspace-sync/`. The shared state uses
+  semantic anchors, not row indices: active Explorer/SCM view, selected/top path or SCM row,
+  tree/repo/drawer/ref expansion, Sidebar width, and list/message focus. Preview, overlays,
+  hover, mouse position, notices, and commit-message text stay tab-local. Different roots use
+  different state files and deliberately do not sync. Background panes apply shared state but
+  publish only after local input (or a focused Sidebar's async completion), so Git refreshes in
+  hidden tabs cannot overwrite the active tab. A separate workspace focus-role file lets the
+  `tab.focused` / `workspace.focused` ensure hook focus the destination Sidebar, or move off it
+  to an existing content pane. Herdr renders the destination tab's stored focus before the hook
+  runs, so this host-focus correction is best-effort and may appear one frame later; arbitrary
+  content panes are not mapped across tabs.
 - User-facing wording is **"Unified sidebar: on/off"**, toggled in the ⚙ Settings modal
   (`s` key or the gear button) — never "merge"/"detach" in UI text, and the toggle is
   silent (the layout change is the feedback). Off spawns a second pane of the same binary

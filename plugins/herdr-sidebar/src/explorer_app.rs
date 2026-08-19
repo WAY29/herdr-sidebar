@@ -23,6 +23,7 @@ use herdr_sidebar::ui::{
     wrap_footer_message, wrap_hints,
 };
 use herdr_sidebar::tree::{Row, Tree};
+use herdr_sidebar::workspace_sync::ExplorerState;
 
 use herdr_sidebar::state::Exit;
 
@@ -232,6 +233,10 @@ impl Default for ActivityZones {
 
 impl App {
     pub fn new(root: PathBuf) -> Self {
+        Self::new_with_pane(root, PaneCtl::from_env())
+    }
+
+    fn new_with_pane(root: PathBuf, pane_ctl: Option<PaneCtl>) -> Self {
         let mut tree = Tree::new(root);
         let rows = tree.rows();
         let sidebar_state = sidebar::load_state();
@@ -242,7 +247,6 @@ impl App {
                 .as_deref(),
             sidebar_state.icons,
         );
-        let pane_ctl = PaneCtl::from_env();
         // The other view ships in this same binary — always available.
         let other_exe = std::env::current_exe().ok();
         let app = Self {
@@ -271,7 +275,9 @@ impl App {
             last_beat: std::time::Instant::now(),
             picking: None,
         };
-        app.apply_identity();
+        if app.pane_ctl.is_some() {
+            app.apply_identity();
+        }
         app
     }
 
@@ -295,6 +301,61 @@ impl App {
 
     pub fn has_overlay(&self) -> bool {
         self.overlay.is_some()
+    }
+
+    pub fn root(&self) -> PathBuf {
+        self.tree.root_path()
+    }
+
+    pub fn workspace_state(&mut self) -> ExplorerState {
+        let root = self.tree.root_path();
+        let rows = self.tree.rows();
+        let relative = |path: &Path| path.strip_prefix(&root).ok().map(Path::to_path_buf);
+        ExplorerState {
+            selected: self.selected.and_then(|index| rows.get(index)).and_then(|row| relative(&row.path)),
+            top: rows.get(self.scroll).and_then(|row| relative(&row.path)),
+            expanded: self
+                .tree
+                .expanded_paths()
+                .iter()
+                .filter_map(|path| relative(path))
+                .collect(),
+        }
+    }
+
+    pub fn apply_workspace_state(&mut self, state: &ExplorerState) {
+        let root = self.tree.root_path();
+        self.tree.set_expanded_paths(
+            state.expanded.iter().map(|path| root.join(path)).collect(),
+        );
+        self.tree.refresh();
+        let rows = self.tree.rows();
+        let find = |path: &Path| rows.iter().position(|row| row.path == root.join(path));
+        self.selected = state.selected.as_deref().and_then(find);
+        self.scroll = state
+            .top
+            .as_deref()
+            .and_then(find)
+            .unwrap_or_else(|| self.selected.unwrap_or(0))
+            .min(rows.len().saturating_sub(1));
+        self.snap = false;
+        self.hovered = None;
+    }
+
+    pub fn workspace_width(&self) -> u16 {
+        self.last_width
+    }
+
+    pub fn workspace_sync_enabled(&self) -> bool {
+        self.merged()
+    }
+
+    pub fn apply_workspace_width(&self, width: u16) {
+        if width > 0 && width != self.last_width
+            && let Some(ctl) = &self.pane_ctl
+        {
+            ctl.resize_to(self.last_width, width);
+        }
     }
 
     /// The label this pane should carry while expanded.
@@ -1905,6 +1966,38 @@ mod tests {
         assert!(row_menu_hit(19, 20));
         assert!(!row_menu_hit(20, 20));
         assert_eq!(list_content_width(20, 21, 20), 19);
+    }
+
+    #[test]
+    fn workspace_state_restores_semantic_tree_position() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-explorer-sync-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/nested/main.rs"), "fn main() {}\n").unwrap();
+
+        let mut source = App::new_with_pane(root.clone(), None);
+        source.tree.expand(&root.join("src"));
+        source.tree.expand(&root.join("src/nested"));
+        source.rows = source.tree.rows();
+        source.selected = source
+            .rows
+            .iter()
+            .position(|row| row.path == root.join("src/nested/main.rs"));
+        source.scroll = source
+            .rows
+            .iter()
+            .position(|row| row.path == root.join("src/nested"))
+            .unwrap();
+        let expected = source.workspace_state();
+
+        let mut target = App::new_with_pane(root.clone(), None);
+        target.apply_workspace_state(&expected);
+        assert_eq!(target.workspace_state(), expected);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
 }

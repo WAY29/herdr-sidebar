@@ -44,6 +44,14 @@ impl Tree {
         self.root.clone()
     }
 
+    pub fn expanded_paths(&self) -> &BTreeSet<PathBuf> {
+        &self.expanded
+    }
+
+    pub fn set_expanded_paths(&mut self, expanded: BTreeSet<PathBuf>) {
+        self.expanded = expanded;
+    }
+
     /// Display name for the header: the folder's own name, or the full path for
     /// roots like `C:\` that have no final component.
     pub fn root_name(&self) -> String {

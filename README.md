@@ -39,6 +39,11 @@ The activity bar at the top flips between **Explorer** and **Source Control** â€
 process*, so switching is instant: no respawn, no flicker, no lost state on the way. Both
 views ship in one small Rust binary.
 
+Unified sidebars also stay visually aligned across tabs in the same workspace when they point
+at the same folder: current view, selection, scroll anchor, expanded trees and drawers, width,
+and Sidebar focus follow the active tab. Previews, menus, hover state, and commit drafts remain
+local to each tab.
+
 ### ðŸ—‚ The Explorer
 
 A real tree, not a directory dump:

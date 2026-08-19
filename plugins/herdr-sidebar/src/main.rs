@@ -11,13 +11,14 @@ mod explorer_app;
 mod scm_app;
 
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
     MouseEventKind,
 };
 use herdr_sidebar::{launch, state, viewer};
+use herdr_sidebar::workspace_sync::Session as SyncSession;
 use state::{Exit, View};
 
 /// How often the source-control view re-reads `git status` while idle.
@@ -87,6 +88,21 @@ fn main() -> std::io::Result<()> {
     } else {
         View::Explorer
     });
+    let mut sync = if pinned.is_none() && persisted.merged {
+        std::env::current_dir()
+            .ok()
+            .and_then(|root| SyncSession::connect(&root, true))
+    } else {
+        None
+    };
+    if let Some(session) = sync.as_mut() {
+        if let Some(shared) = session.poll() {
+            view = shared.active;
+        }
+        if session.pane_focused() {
+            session.note_focus_gained();
+        }
+    }
 
     // ONE terminal session for every view: switching drops the old view's
     // state and draws the other in the same alternate screen — instant, and
@@ -111,13 +127,17 @@ fn main() -> std::io::Result<()> {
     herdr_sidebar::fontsetup::maybe_prompt(&mut terminal, view, persisted.merged)?;
     let result = loop {
         let exit = match view {
-            View::Explorer => run_explorer(&mut terminal),
-            View::SourceControl => run_scm(&mut terminal),
+            View::Explorer => run_explorer(&mut terminal, &mut sync),
+            View::SourceControl => run_scm(&mut terminal, &mut sync),
         };
         match exit {
             Ok(Exit::Quit) => break Ok(()),
             Ok(Exit::Switch) => {
-                view = view.other();
+                view = sync
+                    .as_ref()
+                    .and_then(SyncSession::latest)
+                    .map(|state| state.active)
+                    .unwrap_or_else(|| view.other());
             }
             Err(e) => break Err(e),
         }
@@ -135,11 +155,47 @@ fn read_stdin() -> std::io::Result<String> {
 
 /// The explorer's event loop: short poll so the liveness heartbeat keeps
 /// stamping even while idle.
-fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
+fn run_explorer(
+    terminal: &mut ratatui::DefaultTerminal,
+    sync: &mut Option<SyncSession>,
+) -> std::io::Result<Exit> {
     let root = std::env::current_dir()?;
     let mut app = explorer_app::App::new(root);
+    configure_sync(sync, &app.root(), app.workspace_sync_enabled());
     let mut preview = viewer::InlinePreview::for_current_pane();
+    let mut target_width = None;
+    let mut width_dirty = false;
+    let mut ignore_resize_until = None;
+    let mut needs_initial_publish = sync
+        .as_ref()
+        .and_then(SyncSession::latest)
+        .and_then(|state| state.explorer.as_ref())
+        .is_none();
+    if let Some(shared) = sync.as_ref().and_then(SyncSession::latest).cloned()
+        && shared.active == View::Explorer
+    {
+        if let Some(explorer) = &shared.explorer {
+            app.apply_workspace_state(explorer);
+        }
+        target_width = Some(shared.width);
+    }
     loop {
+        configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+        if let Some(session) = sync.as_mut() {
+            session.set_unified(app.workspace_sync_enabled());
+            session.set_root(&app.root());
+            if !app.has_overlay() && !preview.is_open()
+                && let Some(shared) = session.poll()
+            {
+                if shared.active != View::Explorer {
+                    return Ok(Exit::Switch);
+                }
+                if let Some(explorer) = &shared.explorer {
+                    app.apply_workspace_state(explorer);
+                }
+                target_width = Some(shared.width);
+            }
+        }
         preview.sync();
         terminal.draw(|frame| {
             let area = frame.area();
@@ -150,10 +206,41 @@ fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit
                 app.draw(frame);
             }
         })?;
+        let width = app.workspace_width();
+        if !preview.is_open() {
+            if let Some(target) = target_width.take() {
+                if target > 0 && target != width {
+                    app.apply_workspace_width(target);
+                    ignore_resize_until = Some(Instant::now() + Duration::from_secs(1));
+                }
+                width_dirty = false;
+            } else if needs_initial_publish {
+                if let Some(session) = sync.as_mut() {
+                    session.publish_explorer(View::Explorer, width, app.workspace_state());
+                }
+                needs_initial_publish = false;
+            } else if width_dirty {
+                if let Some(session) = sync.as_mut() {
+                    session.publish_active(View::Explorer, width);
+                }
+                width_dirty = false;
+            }
+        }
+        let before_root = app.root();
+        let before = app.workspace_state();
         // 500ms: quick enough that a finished folder pick lands promptly,
         // still cheap for the heartbeat.
-        if event::poll(Duration::from_millis(500))? {
-            let exit = match event::read()? {
+        let had_event = if event::poll(Duration::from_millis(500))? {
+            let event = event::read()?;
+            if matches!(event, Event::Resize(..)) {
+                if ignore_resize_until.is_some_and(|until| Instant::now() <= until) {
+                    ignore_resize_until = None;
+                } else {
+                    width_dirty = true;
+                }
+            }
+            note_sync_focus(sync, &event);
+            let exit = match event {
                 Event::Key(key) if preview.is_open() && !app.has_overlay() => {
                     preview.on_key(key);
                     None
@@ -186,24 +273,84 @@ fn run_explorer(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit
                 _ => None, // resize simply falls through to a redraw
             };
             if let Some(exit) = exit {
+                if let Some(session) = sync.as_mut() {
+                    session.set_root(&app.root());
+                    session.publish_explorer(
+                        if exit == Exit::Switch { View::SourceControl } else { View::Explorer },
+                        app.workspace_width(),
+                        app.workspace_state(),
+                    );
+                    if exit == Exit::Quit {
+                        session.clear_focus();
+                    }
+                }
                 return Ok(exit);
             }
+            true
         } else {
             app.poll_picker();
-        }
+            false
+        };
         app.heartbeat();
         preview.sync();
         preview.tick();
+        let after_root = app.root();
+        let after = app.workspace_state();
+        let can_publish = had_event
+            || sync.as_ref().is_some_and(SyncSession::pane_focused);
+        if (before_root != after_root || before != after) && can_publish
+            && let Some(session) = sync.as_mut()
+        {
+            session.set_root(&after_root);
+            session.publish_explorer(View::Explorer, app.workspace_width(), after);
+        }
     }
 }
 
 /// The source-control view's event loop: poll + tick so external changes and
 /// finished background work (✧ suggestions, syncs) show up on their own.
-fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
+fn run_scm(
+    terminal: &mut ratatui::DefaultTerminal,
+    sync: &mut Option<SyncSession>,
+) -> std::io::Result<Exit> {
     let cwd = std::env::current_dir()?;
     let mut app = scm_app::App::new(cwd);
+    configure_sync(sync, &app.root(), app.workspace_sync_enabled());
     let mut preview = viewer::InlinePreview::for_current_pane();
+    let mut target_width = None;
+    let mut width_dirty = false;
+    let mut ignore_resize_until = None;
+    let mut last_refresh = Instant::now();
+    let mut needs_initial_publish = sync
+        .as_ref()
+        .and_then(SyncSession::latest)
+        .and_then(|state| state.scm.as_ref())
+        .is_none();
+    if let Some(shared) = sync.as_ref().and_then(SyncSession::latest).cloned()
+        && shared.active == View::SourceControl
+    {
+        if let Some(scm) = &shared.scm {
+            app.apply_workspace_state(scm);
+        }
+        target_width = Some(shared.width);
+    }
     loop {
+        configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+        if let Some(session) = sync.as_mut() {
+            session.set_unified(app.workspace_sync_enabled());
+            session.set_root(&app.root());
+            if !app.has_overlay() && !preview.is_open()
+                && let Some(shared) = session.poll()
+            {
+                if shared.active != View::SourceControl {
+                    return Ok(Exit::Switch);
+                }
+                if let Some(scm) = &shared.scm {
+                    app.apply_workspace_state(scm);
+                }
+                target_width = Some(shared.width);
+            }
+        }
         preview.sync();
         terminal.draw(|frame| {
             let area = frame.area();
@@ -214,8 +361,39 @@ fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
                 app.draw(frame);
             }
         })?;
-        if event::poll(REFRESH_EVERY)? {
-            let exit = match event::read()? {
+        let width = app.workspace_width();
+        if !preview.is_open() {
+            if let Some(target) = target_width.take() {
+                if target > 0 && target != width {
+                    app.apply_workspace_width(target);
+                    ignore_resize_until = Some(Instant::now() + Duration::from_secs(1));
+                }
+                width_dirty = false;
+            } else if needs_initial_publish {
+                if let Some(session) = sync.as_mut() {
+                    session.publish_scm(View::SourceControl, width, app.workspace_state());
+                }
+                needs_initial_publish = false;
+            } else if width_dirty {
+                if let Some(session) = sync.as_mut() {
+                    session.publish_active(View::SourceControl, width);
+                }
+                width_dirty = false;
+            }
+        }
+        let before_root = app.root();
+        let before = app.workspace_state();
+        let had_event = if event::poll(Duration::from_millis(500))? {
+            let event = event::read()?;
+            if matches!(event, Event::Resize(..)) {
+                if ignore_resize_until.is_some_and(|until| Instant::now() <= until) {
+                    ignore_resize_until = None;
+                } else {
+                    width_dirty = true;
+                }
+            }
+            note_sync_focus(sync, &event);
+            let exit = match event {
                 Event::Key(key) if preview.is_open() && !app.has_overlay() => {
                     preview.on_key(key);
                     None
@@ -249,14 +427,68 @@ fn run_scm(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<Exit> {
                 _ => None,
             };
             if let Some(exit) = exit {
+                if let Some(session) = sync.as_mut() {
+                    session.set_root(&app.root());
+                    session.publish_scm(
+                        if exit == Exit::Switch { View::Explorer } else { View::SourceControl },
+                        app.workspace_width(),
+                        app.workspace_state(),
+                    );
+                    if exit == Exit::Quit {
+                        session.clear_focus();
+                    }
+                }
                 return Ok(exit);
             }
+            true
         } else {
             app.poll_picker();
+            false
+        };
+        if last_refresh.elapsed() >= REFRESH_EVERY {
+            app.poll_picker();
             app.tick();
+            last_refresh = Instant::now();
         }
         app.heartbeat();
         preview.sync();
         preview.tick();
+        let after_root = app.root();
+        let after = app.workspace_state();
+        let can_publish = had_event
+            || sync.as_ref().is_some_and(SyncSession::pane_focused);
+        if (before_root != after_root || before != after) && can_publish
+            && let Some(session) = sync.as_mut()
+        {
+            session.set_root(&after_root);
+            session.publish_scm(View::SourceControl, app.workspace_width(), after);
+        }
+    }
+}
+
+fn note_sync_focus(sync: &mut Option<SyncSession>, event: &Event) {
+    let Some(session) = sync.as_mut() else { return };
+    match event {
+        Event::FocusGained => session.note_focus_gained(),
+        Event::FocusLost => session.note_focus_lost(),
+        Event::Key(_) | Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(_), .. }) => {
+            session.note_interaction();
+        }
+        _ => {}
+    }
+}
+
+fn configure_sync(sync: &mut Option<SyncSession>, root: &std::path::Path, enabled: bool) {
+    if enabled {
+        if sync.is_none() {
+            *sync = SyncSession::connect(root, true);
+            if let Some(session) = sync.as_mut()
+                && session.pane_focused()
+            {
+                session.note_focus_gained();
+            }
+        }
+    } else if let Some(mut session) = sync.take() {
+        session.set_unified(false);
     }
 }

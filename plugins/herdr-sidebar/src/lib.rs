@@ -20,3 +20,4 @@ pub mod syntax;
 pub mod tree;
 pub mod ui;
 pub mod viewer;
+pub mod workspace_sync;

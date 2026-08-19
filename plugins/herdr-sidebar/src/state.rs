@@ -34,7 +34,7 @@ pub enum Exit {
     Switch,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum View {
     Explorer,
     SourceControl,
@@ -194,7 +194,7 @@ pub fn state_path() -> Option<PathBuf> {
     Some(state_dir()?.join("state.json"))
 }
 
-fn state_dir() -> Option<PathBuf> {
+pub fn state_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("HERDR_PLUGIN_STATE_DIR")
         && !dir.is_empty()
     {

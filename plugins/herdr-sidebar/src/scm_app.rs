@@ -36,6 +36,9 @@ use herdr_sidebar::ui::{
 };
 use herdr_sidebar::actions::{copy_to_clipboard, open_external, reveal};
 use herdr_sidebar::suggest;
+use herdr_sidebar::workspace_sync::{
+    ExpandedScmRef, ScmAnchor, ScmDrawer, ScmFocus, ScmRef, ScmRepoState, ScmState,
+};
 
 // VS Code's dark-theme git decoration colors.
 const BUTTON_BLUE: Color = Color::Rgb(0x00, 0x78, 0xd4);
@@ -150,6 +153,44 @@ enum DrawerRef {
     Tag(String),
     /// A worktree's checkout path.
     Worktree(String),
+}
+
+fn sync_drawer(drawer: Drawer) -> ScmDrawer {
+    match drawer {
+        Drawer::Graph => ScmDrawer::Graph,
+        Drawer::Commits => ScmDrawer::Commits,
+        Drawer::FileHistory => ScmDrawer::FileHistory,
+        Drawer::Branches => ScmDrawer::Branches,
+        Drawer::Worktrees => ScmDrawer::Worktrees,
+        Drawer::Remotes => ScmDrawer::Remotes,
+        Drawer::Stashes => ScmDrawer::Stashes,
+        Drawer::Tags => ScmDrawer::Tags,
+    }
+}
+
+fn app_drawer(drawer: ScmDrawer) -> Drawer {
+    match drawer {
+        ScmDrawer::Graph => Drawer::Graph,
+        ScmDrawer::Commits => Drawer::Commits,
+        ScmDrawer::FileHistory => Drawer::FileHistory,
+        ScmDrawer::Branches => Drawer::Branches,
+        ScmDrawer::Worktrees => Drawer::Worktrees,
+        ScmDrawer::Remotes => Drawer::Remotes,
+        ScmDrawer::Stashes => Drawer::Stashes,
+        ScmDrawer::Tags => Drawer::Tags,
+    }
+}
+
+fn sync_ref(target: &DrawerRef) -> ScmRef {
+    match target {
+        DrawerRef::None => ScmRef::None,
+        DrawerRef::Commit(hash) => ScmRef::Commit(hash.clone()),
+        DrawerRef::Stash(index) => ScmRef::Stash(*index),
+        DrawerRef::Branch { name, .. } => ScmRef::Branch(name.clone()),
+        DrawerRef::Remote { name, .. } => ScmRef::Remote(name.clone()),
+        DrawerRef::Tag(name) => ScmRef::Tag(name.clone()),
+        DrawerRef::Worktree(path) => ScmRef::Worktree(path.clone()),
+    }
 }
 
 /// Parse the actionable reference out of one drawer line.
@@ -772,6 +813,10 @@ const MY_VIEW: View = View::SourceControl;
 
 impl App {
     pub fn new(cwd: PathBuf) -> Self {
+        Self::new_with_pane(cwd, PaneCtl::from_env())
+    }
+
+    fn new_with_pane(cwd: PathBuf, pane_ctl: Option<PaneCtl>) -> Self {
         let repos: Vec<Repo> = Git::discover_all(&cwd).into_iter().map(Repo::new).collect();
         let discover_err = if repos.is_empty() {
             Git::discover(&cwd).err().unwrap_or_else(|| "no repositories found".to_string())
@@ -789,7 +834,6 @@ impl App {
         );
         // The other view ships in this same binary — always available.
         let other_exe = std::env::current_exe().ok();
-        let pane_ctl = PaneCtl::from_env();
         let mut app = Self {
             repos,
             discover_err,
@@ -824,7 +868,9 @@ impl App {
             last_beat: std::time::Instant::now(),
             picking: None,
         };
-        app.apply_identity();
+        if app.pane_ctl.is_some() {
+            app.apply_identity();
+        }
         app.refresh();
         app
     }
@@ -928,6 +974,198 @@ impl App {
 
     pub fn has_overlay(&self) -> bool {
         self.overlay.is_some()
+    }
+
+    pub fn root(&self) -> PathBuf {
+        self.cwd.clone()
+    }
+
+    pub fn workspace_state(&self) -> ScmState {
+        let selected = self.selected.and_then(|index| self.anchor_at(index));
+        let top = (self.scroll..self.rows.len())
+            .find_map(|index| self.anchor_at(index))
+            .or_else(|| (0..self.scroll).rev().find_map(|index| self.anchor_at(index)));
+        ScmState {
+            active_repo: self.active_repo().map(|repo| repo.git.root().to_path_buf()),
+            focus: match self.focus {
+                Focus::List => ScmFocus::List,
+                Focus::Message => ScmFocus::Message,
+                Focus::Commit => ScmFocus::Commit,
+            },
+            selected,
+            top,
+            repos: self
+                .repos
+                .iter()
+                .map(|repo| ScmRepoState {
+                    root: repo.git.root().to_path_buf(),
+                    collapsed: repo.collapsed,
+                    staged_collapsed: repo.staged_collapsed,
+                    changes_collapsed: repo.changes_collapsed,
+                    staged_dirs: repo.staged_dirs.clone(),
+                    changes_dirs: repo.changes_dirs.clone(),
+                })
+                .collect(),
+            drawers: Drawer::ALL
+                .iter()
+                .copied()
+                .filter(|drawer| self.drawers[drawer.index()].expanded)
+                .map(sync_drawer)
+                .collect(),
+            expanded_ref: self.expanded_ref.as_ref().map(|expanded| ExpandedScmRef {
+                drawer: sync_drawer(expanded.kind),
+                target: sync_ref(&expanded.target),
+                collapsed: expanded.collapsed.clone(),
+            }),
+        }
+    }
+
+    pub fn apply_workspace_state(&mut self, state: &ScmState) {
+        let current = self.workspace_state();
+        let selected_history = match state.selected.as_ref() {
+            Some(ScmAnchor::Staged { path, .. } | ScmAnchor::Changes { path, .. }) => {
+                Some(path.clone())
+            }
+            _ => None,
+        };
+        let history_changed = state.drawers.contains(&ScmDrawer::FileHistory)
+            && selected_history.as_ref() != self.history_target.as_ref();
+        let structure_changed = current.active_repo != state.active_repo
+            || current.repos != state.repos
+            || current.drawers != state.drawers
+            || current.expanded_ref != state.expanded_ref;
+        self.focus = match state.focus {
+            ScmFocus::List => Focus::List,
+            ScmFocus::Message => Focus::Message,
+            ScmFocus::Commit => Focus::Commit,
+        };
+        if !structure_changed && !history_changed {
+            self.selected = state.selected.as_ref().and_then(|anchor| self.find_anchor(anchor));
+            self.scroll = state
+                .top
+                .as_ref()
+                .and_then(|anchor| self.find_anchor(anchor))
+                .unwrap_or_else(|| self.selected.unwrap_or(0))
+                .min(self.rows.len().saturating_sub(1));
+            self.snap = false;
+            self.hovered = None;
+            self.mouse_pos = None;
+            return;
+        }
+        if let Some(active) = state.active_repo.as_deref()
+            && let Some(index) = self.repos.iter().position(|repo| repo.git.root() == active)
+        {
+            self.active = index;
+        }
+        for repo in &mut self.repos {
+            if let Some(shared) = state.repos.iter().find(|shared| shared.root == repo.git.root()) {
+                repo.collapsed = shared.collapsed;
+                repo.staged_collapsed = shared.staged_collapsed;
+                repo.changes_collapsed = shared.changes_collapsed;
+                repo.staged_dirs.clone_from(&shared.staged_dirs);
+                repo.changes_dirs.clone_from(&shared.changes_dirs);
+                repo.rebuild_file_rows(self.sidebar_state.scm_file_view);
+            }
+        }
+        if selected_history.is_some() {
+            self.history_target = selected_history;
+        }
+        for drawer in Drawer::ALL {
+            self.drawers[drawer.index()].expanded = state.drawers.contains(&sync_drawer(drawer));
+        }
+        self.expanded_ref = None;
+        self.reload_expanded_drawers();
+        self.rebuild();
+        if let Some(shared) = &state.expanded_ref {
+            let drawer = app_drawer(shared.drawer);
+            if let Some(index) = self.drawers[drawer.index()]
+                .refs
+                .iter()
+                .position(|target| sync_ref(target) == shared.target)
+            {
+                self.toggle_expanded_ref(drawer, index);
+                if let Some(expanded) = self.expanded_ref.as_mut() {
+                    expanded.collapsed.clone_from(&shared.collapsed);
+                    expanded.rebuild_rows(self.sidebar_state.scm_file_view);
+                    self.rebuild();
+                }
+            }
+        }
+        self.selected = state.selected.as_ref().and_then(|anchor| self.find_anchor(anchor));
+        self.scroll = state
+            .top
+            .as_ref()
+            .and_then(|anchor| self.find_anchor(anchor))
+            .unwrap_or_else(|| self.selected.unwrap_or(0))
+            .min(self.rows.len().saturating_sub(1));
+        self.snap = false;
+        self.hovered = None;
+        self.mouse_pos = None;
+    }
+
+    pub fn workspace_width(&self) -> u16 {
+        self.last_width
+    }
+
+    pub fn workspace_sync_enabled(&self) -> bool {
+        self.merged()
+    }
+
+    pub fn apply_workspace_width(&self, width: u16) {
+        if width > 0 && width != self.last_width
+            && let Some(ctl) = &self.pane_ctl
+        {
+            ctl.resize_to(self.last_width, width);
+        }
+    }
+
+    fn anchor_at(&self, index: usize) -> Option<ScmAnchor> {
+        match *self.rows.get(index)? {
+            Row::RepoHeader(repo) => Some(ScmAnchor::Repo(self.repo_root(repo)?)),
+            Row::Message(repo) => Some(ScmAnchor::Message(self.repo_root(repo)?)),
+            Row::Commit(repo) => Some(ScmAnchor::Commit(self.repo_root(repo)?)),
+            Row::StagedHeader(repo) => Some(ScmAnchor::StagedHeader(self.repo_root(repo)?)),
+            Row::ChangesHeader(repo) => Some(ScmAnchor::ChangesHeader(self.repo_root(repo)?)),
+            Row::Staged(repo, row) => Some(ScmAnchor::Staged {
+                repo: self.repo_root(repo)?,
+                path: self.status_row_path(repo, row, true)?.to_string(),
+            }),
+            Row::Unstaged(repo, row) => Some(ScmAnchor::Changes {
+                repo: self.repo_root(repo)?,
+                path: self.status_row_path(repo, row, false)?.to_string(),
+            }),
+            Row::DrawerHeader(drawer) => Some(ScmAnchor::DrawerHeader(sync_drawer(drawer))),
+            Row::DrawerLine(drawer, line) => Some(ScmAnchor::DrawerLine {
+                drawer: sync_drawer(drawer),
+                target: sync_ref(self.drawers[drawer.index()].refs.get(line)?),
+            }),
+            Row::HistoryTree(row) => Some(ScmAnchor::HistoryPath(
+                self.expanded_ref_path(row)?.to_string(),
+            )),
+            Row::HistoryNotice => Some(ScmAnchor::HistoryNotice),
+            Row::RepoSeparator => None,
+        }
+    }
+
+    fn find_anchor(&self, anchor: &ScmAnchor) -> Option<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| (self.anchor_at(index).as_ref() == Some(anchor)).then_some(index))
+    }
+
+    fn repo_root(&self, repo: usize) -> Option<PathBuf> {
+        self.repos.get(repo).map(|repo| repo.git.root().to_path_buf())
+    }
+
+    fn expanded_ref_path(&self, row: usize) -> Option<&str> {
+        let expanded = self.expanded_ref.as_ref()?;
+        match expanded.rows.get(row)? {
+            ChangeTreeRow::Directory { path, .. } => Some(path),
+            ChangeTreeRow::File { index, .. } => {
+                expanded.files.get(*index).map(|file| file.entry.path.as_str())
+            }
+        }
     }
 
     /// Push our label + metadata tokens to herdr for the current mode.
@@ -4526,6 +4764,61 @@ mod tests {
         assert_eq!(collapsed, BTreeSet::from(["other".to_string()]));
         toggle_collapsed_path(&mut collapsed, "src/components", true);
         assert!(collapsed.contains("src/components"));
+    }
+
+    #[test]
+    fn workspace_state_restores_scm_tree_and_viewport_anchors() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-scm-sync-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "--quiet", "-m", "init"]);
+        std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"changed\"); }\n")
+            .unwrap();
+        std::fs::write(root.join("docs/note.md"), "new\n").unwrap();
+
+        let mut source = App::new_with_pane(root.clone(), None);
+        source.repos[0].staged_collapsed = true;
+        source.repos[0].changes_dirs.insert("docs".into());
+        source.repos[0].rebuild_file_rows(source.sidebar_state.scm_file_view);
+        source.rebuild();
+        source.selected = source.rows.iter().enumerate().find_map(|(index, _)| {
+            matches!(
+                source.anchor_at(index),
+                Some(ScmAnchor::Changes { ref path, .. }) if path == "src/main.rs"
+            )
+            .then_some(index)
+        });
+        source.scroll = source
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::ChangesHeader(0)))
+            .unwrap();
+        source.focus = Focus::Commit;
+        let expected = source.workspace_state();
+
+        let mut target = App::new_with_pane(root.clone(), None);
+        target.apply_workspace_state(&expected);
+        assert_eq!(target.workspace_state(), expected);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
     }
 
 }
