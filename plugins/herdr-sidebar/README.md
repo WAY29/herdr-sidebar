@@ -1,7 +1,7 @@
 # herdr-sidebar
 
-**The sidebar your terminal was missing** — a VS Code-inspired file explorer + source
-control panel in one dockable herdr pane.
+**The sidebar your terminal was missing** — a VS Code-inspired file explorer, full-text
+search, and source-control panel in one dockable herdr pane.
 
 <img src="docs/media/hero.png" alt="The sidebar: explorer view with a live file preview beside it" width="860">
 
@@ -10,13 +10,11 @@ keys, and settings.
 
 ## Install
 
-```
-herdr plugin install alexarthurs/herdr-sidebar/plugins/herdr-sidebar
-```
+Install this fork from a local checkout:
 
-or from a local checkout:
-
-```
+```bash
+git clone https://github.com/way29/herdr-sidebar.git
+cd herdr-sidebar/plugins/herdr-sidebar
 cargo build --release
 herdr plugin link .
 ```

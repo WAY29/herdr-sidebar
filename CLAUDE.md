@@ -8,13 +8,13 @@ your branch so it lands on main with the merge.
 
 One herdr plugin, a VS Code-style sidebar for the terminal, as a **self-contained Rust crate**:
 
-- `plugins/herdr-sidebar` — file explorer + source control in ONE binary (ratatui TUI).
-  Unified mode shows both views in a single "Sidebar" pane with an activity-bar switcher
-  (in-process, instant); the ⚙ settings can split them into separate Explorer /
-  Source Control panes (`--view explorer|git` pins a pane's starting view). `--preview`
-  runs the file-preview pane. Views live in `src/explorer_app.rs` / `src/scm_app.rs`
-  (bin modules); shared pieces (icons, ipc, launch parsing, state, ui helpers) are lib
-  modules — nothing is copy-mirrored anymore.
+- `plugins/herdr-sidebar` — file explorer + source control + search in ONE binary (ratatui TUI).
+  Unified mode shows all three views in a single "Sidebar" pane with an activity-bar switcher
+  (in-process, instant); the ⚙ settings can split Explorer / Source Control into separate panes
+  (`--view explorer|git` pins a pane's starting view; Search stays unified-only). Normal Preview
+  rendering is in-process; `--preview` remains a legacy entrypoint. Views live in
+  `src/explorer_app.rs` / `src/scm_app.rs` / `src/search_app.rs` (bin modules); shared pieces
+  (icons, ipc, launch parsing, state, ui helpers) are lib modules — nothing is copy-mirrored.
 
 There is deliberately **no root cargo workspace**: `herdr plugin install <owner>/<repo>/<subdir>`
 treats the subdirectory as the plugin root, and each plugin's `herdr-plugin.toml` points at
@@ -52,7 +52,7 @@ cargo clippy -- -D warnings
   viewer plugin (ratatui). Its `herdr-plugin.toml` header documents hard-won **Windows
   findings** — read it before touching manifests.
 - `%APPDATA%\herdr\plugins\github\herdr-spreader-f248c87aa2e2\` — minimal manifest + layout tool.
-- herdr source: https://github.com/ogulcancelik/herdr — **if you run into issues integrating a
+- herdr source: https://github.com/herdrdev/herdr — **if you run into issues integrating a
   plugin** (manifest not loading, pane spawn failures, action/IPC behavior that doesn't match the
   docs), read the open-source herdr code there to see what the host actually does, rather than
   guessing from error messages.
@@ -110,8 +110,8 @@ cargo clippy -- -D warnings
 - **Pushing a tag alone does NOT update the repo's "Latest" release badge** — also run
   `gh release create vX.Y.Z --title vX.Y.Z --notes-file <md>`. House style for notes: a
   headline `##`, Fixes/New sections referencing issue/PR numbers and crediting contributor
-  handles, and the `herdr plugin install alexarthurs/herdr-sidebar/plugins/herdr-sidebar`
-  snippet at the end.
+  handles, and a link to the README's local-checkout installation section at the end. Do not
+  publish a remote `herdr plugin install` command for this fork.
 - Merging contributor PRs locally (`git fetch origin pull/N/head:pr-N`, `git merge --no-ff
   pr-N`, push main) marks them MERGED on GitHub, and `Fixes #N`/`Closes #N` in commit
   messages auto-close the issues on push. Branch protection ("changes must be made through
@@ -363,7 +363,8 @@ HACKING.md — budget time for that before promising a patched build.
 
 ### Unified sidebar (see `src/state.rs`)
 
-- Both views ship in ONE binary: the activity bar switches them **in process** (instant,
+- Explorer, Source Control, and Search ship in ONE binary: the activity bar switches them
+  **in process** (instant,
   no flash — the terminal session is held across switches). The old two-crate host/guest
   process-swap protocol is gone.
 - Unified Sidebar now has a third in-process **Search** tab (`src/search_app.rs`) in
@@ -539,7 +540,7 @@ HACKING.md — budget time for that before promising a patched build.
   the outline ✨ silhouette) in the material theme.
 - There is NO collapse-to-sliver mode anymore (herdr's 10% ratio floor made the sliver
   a wide empty strip — user-rejected). « bottom-right / `b` HIDE the sidebar instead:
-  per-tab snooze marker + `pane.close` of its own pane (`hide()` in both apps,
+  per-tab snooze marker + `pane.close` of its own pane (`hide()` in all three apps,
   `src/snooze.rs` shared with the ensure hook, `launch::tab_of`). The herdr keybinding
   `prefix+b` (config.toml `[[keys.command]]` → the toggle action, like the other plugin
   binds) brings it back — or hides it again when it's focused.

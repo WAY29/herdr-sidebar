@@ -4,15 +4,15 @@
 
 ### The sidebar your terminal was missing — inspired by VS Code.
 
-A file explorer and a full source-control panel in one dockable
-[herdr](https://github.com/ogulcancelik/herdr) pane — activity-bar switching, mouse
+A file explorer, VS Code-style full-text search, and a full source-control panel in one
+dockable [herdr](https://github.com/herdrdev/herdr) pane — activity-bar switching, mouse
 everywhere, AI-drafted commit messages, and a file preview that takes everything beside
 the sidebar until Esc puts your panes back.
 
 <img alt="Rust" src="https://img.shields.io/badge/Rust-self--contained_crate-orange?logo=rust&logoColor=white">
 <img alt="herdr" src="https://img.shields.io/badge/herdr-%E2%89%A5%200.7-5865a3">
 <img alt="Platforms" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-2ea44f">
-<img alt="CI" src="https://github.com/alexarthurs/herdr-sidebar/actions/workflows/ci.yml/badge.svg">
+<img alt="CI" src="https://github.com/way29/herdr-sidebar/actions/workflows/ci.yml/badge.svg">
 <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 
 <br><br>
@@ -22,27 +22,23 @@ the sidebar until Esc puts your panes back.
 </div>
 
 That's the sidebar on the left and a 2×2 fleet of Claude Code and Codex agents beside it —
-the workflow herdr is built for. If you've ever alt-tabbed out of your terminal just to *look*
-at something — the tree, the diff, what's staged — this closes that loop. The sidebar docks
-on the left of every herdr tab, restores itself on focus, and is driven entirely by click
-or keystroke.
-
-```
-herdr plugin install alexarthurs/herdr-sidebar/plugins/herdr-sidebar
-```
+the workflow herdr is built for. If you've ever alt-tabbed out of your terminal just to
+inspect a tree, search a project, review a diff, or see what's staged, this closes that loop.
+The sidebar docks on the left of every herdr tab, restores itself on focus, and is driven
+entirely by click or keystroke.
 
 ---
 
-## One pane. Two views. Zero friction.
+## One pane. Three views. Zero friction.
 
-The activity bar at the top flips between **Explorer** and **Source Control** — *in
-process*, so switching is instant: no respawn, no flicker, no lost state on the way. Both
-views ship in one small Rust binary.
+The activity bar at the top flips between **Explorer**, **Source Control**, and **Search** —
+*in process*, so switching is instant: no respawn, no flicker, no lost state on the way.
+All three views ship in one Rust binary.
 
 Unified sidebars also stay visually aligned across tabs in the same workspace when they point
 at the same folder: current view, selection, scroll anchor, expanded trees and drawers, width,
-and Sidebar focus follow the active tab. Previews, menus, hover state, and commit drafts remain
-local to each tab.
+Sidebar focus, and Search inputs follow the active tab. Search results, previews, menus, hover
+state, and commit drafts remain local to each tab.
 
 ### 🗂 The Explorer
 
@@ -65,9 +61,27 @@ A real tree, not a directory dump:
   New File, New Folder, Open with Default App (files
   only — hands the file to the OS-associated app, like a double click in the file
   manager), Rename, Delete, Copy Path / Relative Path, Reveal in File Explorer.
-- Dotfiles toggle, live refresh, and a collapse-to-sliver mode when you want the columns back.
+- Dotfiles toggle, live refresh, and `b` / the bottom-right `«` button to hide the Sidebar for
+  the current tab. Invoke the toggle action to bring it back.
 - Prefer the sidebar closed? Toggle "Auto-open sidebar" off in ⚙ Settings and it stays
   closed until you invoke the open-sidebar action yourself.
+
+### 🔎 Search
+
+VS Code-style project search without leaving the Sidebar:
+
+- Type a query and Search runs automatically after a short debounce; `Enter` runs it
+  immediately. A new query cancels the previous `rg` process before streaming replacement
+  results.
+- Toggle regex, case sensitivity, and whole-word matching with the controls below the query.
+- Expand **Filters** for comma-separated include and exclude globs relative to the Sidebar root.
+- Results stream from `rg --json --line-buffered`, grouped by file with the filename first and
+  its directory path after it.
+- Click a result or press `Enter` to open Preview at the matching line, using the same match
+  highlight in the result row and source file.
+
+Search is part of the unified Sidebar. Separated mode keeps Explorer and Source Control as the
+two independent panes.
 
 ### 🔀 Source Control
 
@@ -78,7 +92,7 @@ A real tree, not a directory dump:
 Everything you reach for in an editor's source-control panel, in a terminal pane:
 
 - **Click a change, see the diff** — every changed file opens its colored `git diff` in
-  the preview pane (staged vs working tree respected, untracked shown as additions), and
+  the in-process Preview (staged vs working tree respected, untracked shown as additions), and
   the diff live-updates while you edit.
 - **Stage, unstage, discard, commit** — by key or click, with Staged/Changes sections,
   count badges and familiar per-file status letters; hover a file or folder for its full path and
@@ -106,14 +120,15 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
 ## Prefer two panels? Take two panels.
 
 <div align="center">
-<img src="plugins/herdr-sidebar/docs/media/separated.png" alt="Separated mode: Source Control and Explorer as independent panes, preview beside them" width="920">
+<img src="plugins/herdr-sidebar/docs/media/separated.png" alt="Separated mode: Source Control and Explorer as independent panes" width="920">
 </div>
 
 The ⚙ settings modal — mouse-toggleable like everything else — flips between:
 
-- **Unified sidebar**: both views share one pane, the activity bar switches instantly.
+- **Unified sidebar**: Explorer, Source Control, and Search share one pane; the activity bar
+  switches instantly.
 - **Separated panels**: Explorer and Source Control as independent side-by-side panes —
-  each keeping the full sidebar width.
+  each keeping the full sidebar width. Search is available in unified mode only.
 
 <div align="center">
 <img src="plugins/herdr-sidebar/docs/media/settings.png" alt="The settings modal" width="920">
@@ -127,14 +142,11 @@ worktree, new window, it's just *there*.
 
 ## Install
 
-```
-herdr plugin install alexarthurs/herdr-sidebar/plugins/herdr-sidebar
-```
+This fork is installed from a local checkout:
 
-or from a local checkout:
-
-```
-cd plugins/herdr-sidebar
+```bash
+git clone https://github.com/way29/herdr-sidebar.git
+cd herdr-sidebar/plugins/herdr-sidebar
 cargo build --release
 herdr plugin link .
 ```
@@ -146,10 +158,12 @@ herdr plugin action invoke herdr-sidebar.open-sidebar-windows   # windows
 herdr plugin action invoke herdr-sidebar.open-sidebar           # linux / macos
 ```
 
-**Requirements:** Rust to build, herdr ≥ 0.7. **Recommended:** a Nerd Font terminal face
-for the material icons — without one the sidebar auto-starts in its emoji theme, which
-renders in any font. Note Windows Terminal's bundled Cascadia does NOT include the icon
-glyphs; grab a patched font in one command and select it in your terminal profile:
+**Requirements:** Rust to build and herdr ≥ 0.7. Search additionally requires
+[`ripgrep`](https://github.com/BurntSushi/ripgrep) (`rg`) on `PATH`; the Search view shows a
+Retry screen when it is unavailable. **Recommended:** a Nerd Font terminal face for the
+material icons — without one the sidebar auto-starts in its emoji theme, which renders in
+any font. Note Windows Terminal's bundled Cascadia does NOT include the icon glyphs; grab a
+patched font in one command and select it in your terminal profile:
 
 ```
 winget install DEVCOM.JetBrainsMonoNerdFont
@@ -161,16 +175,41 @@ CaskaydiaCove). Also recommended: the
 
 ## Keys
 
-| Explorer | | Source Control | |
-|---|---|---|---|
-| `↑↓` / `jk` | move | `⏎` | stage / unstage · fold folder |
-| `←→` / `hl` | fold / unfold | `a` / `u` | stage all / none |
-| `⏎` | toggle folder · preview file | `c` | focus message box |
-| `r` | refresh | `A` | ✧ suggest message |
-| `.` | dotfiles | `S` | sync ↑↓ |
-| `b` | collapse to sliver | `r` | refresh |
-| `s` | settings | `s` | settings |
-| `1` / `2` | switch view | `1` / `2` | switch view |
+In unified mode, `1`, `2`, and `3` switch to Explorer, Source Control, and Search. `s` opens
+Settings and `b` hides the Sidebar when focus is not inside a Search text field.
+
+| Explorer | What it does |
+|---|---|
+| `↑↓` / `jk` | move selection |
+| `←→` / `hl` | fold / unfold |
+| `⏎` / `Space` | toggle folder · preview file |
+| `r` | refresh |
+| `.` | toggle dotfiles |
+| `c` | change root folder |
+| `i` | toggle icon theme |
+| `q` | quit |
+
+| Source Control | What it does |
+|---|---|
+| `↑↓` / `jk` | move selection |
+| `←→` / `hl` | fold / unfold tree rows |
+| `⏎` / `Space` | stage / unstage · fold folder |
+| `a` / `u` | stage all / unstage all |
+| `c` | focus commit message |
+| `A` | ✧ suggest commit message |
+| `o` | open selected diff |
+| `S` | sync upstream changes |
+| `r` | refresh |
+| `q` | quit |
+
+| Search | What it does |
+|---|---|
+| Type in query/filter fields | search automatically after 250 ms |
+| `Tab` / `Shift+Tab` | move between query, toggles, filters, and results |
+| `⏎` | search immediately · toggle option · open selected result |
+| `Esc` | clear the query when its field is focused |
+| `↑↓` / `jk` | move through results |
+| `←→` / `hl` | choose regex, case, or whole-word toggle |
 
 …and the mouse for all of it: click, double-click, scroll, hover, and `⋯` menus.
 
@@ -180,15 +219,15 @@ CaskaydiaCove). Also recommended: the
 |---|---|
 | `open-sidebar` / `open-sidebar-windows` | Toggle the sidebar: open left-docked / focus / close |
 | `open-git` / `open-git-windows` | Toggle a separate Source Control pane (separated mode) |
-| `redeploy` / `redeploy-windows` | After a rebuild: refresh every workspace onto the new build |
+| `redeploy` / `redeploy-windows` | After a rebuild: replace old Sidebar panes; other workspaces re-dock on next focus |
 
 ## Under the hood
 
-- **One self-contained Rust crate** — ratatui + crossterm + serde, nothing else. Both
-  views compile into one binary; separated panes are the same binary pinned with `--view`.
-- All herdr control (docking, labels, identity tokens, pane spawning) goes over **herdr's
-  socket API directly**; the Windows focus hooks run a windowless GUI-subsystem sidecar so
-  nothing ever flashes a console window.
+- **One self-contained Rust crate and binary** — all three views share the same runtime;
+  separated Explorer and Source Control panes use that binary pinned with `--view`.
+- Runtime pane control uses **herdr's socket API directly**. Unix launchers open manifest
+  entrypoints without exposing shell commands; Windows focus hooks use a windowless
+  GUI-subsystem sidecar so nothing flashes a console window.
 - The left dock survives real layouts — split-the-leftmost + swap, full-height repair,
   ratio-aware resizing — all unit-tested against herdr's actual JSON.
 - Windows quirks (exe locking, PowerShell 5.1 BOMs, double-width Nerd Font glyphs) are

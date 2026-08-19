@@ -16,7 +16,7 @@ labels: bug
 
 - OS:
 - herdr version (`herdr --version`):
-- Install method: `herdr plugin install` / `herdr plugin link .`
+- Local checkout path / commit:
 
 **Evidence**
 

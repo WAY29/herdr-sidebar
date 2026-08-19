@@ -1686,7 +1686,7 @@ impl App {
             ("q", "quit"),
         ];
         if self.merged() {
-            hints.extend([("1", "files"), ("2", "git")]);
+            hints.extend([("1", "files"), ("2", "git"), ("3", "search")]);
         }
         hints
     }

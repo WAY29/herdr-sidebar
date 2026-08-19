@@ -1,6 +1,6 @@
-# Manifest for herdr-sidebar — the VS Code sidebar for herdr: file explorer
-# and source control in one plugin (one pane by default, separated panes on
-# request via the ⚙ settings).
+# Manifest for herdr-sidebar — the VS Code sidebar for herdr: file explorer,
+# full-text search, and source control in one plugin (one pane by default,
+# separated Explorer/Source Control panes on request via the ⚙ settings).
 #
 # Cross-platform notes (verified against herdr 0.7.1; see CLAUDE.md for the
 # full findings list):
@@ -20,7 +20,7 @@
 id = "herdr-sidebar"
 name = "herdr-sidebar"
 version = "0.7.0"
-description = "VS Code-style sidebar: file explorer + source control (with ✧ AI commit messages) in one herdr pane."
+description = "VS Code-style sidebar: file explorer, full-text search, and source control in one herdr pane."
 min_herdr_version = "0.7.0"
 platforms = ["linux", "macos", "windows"]
 
