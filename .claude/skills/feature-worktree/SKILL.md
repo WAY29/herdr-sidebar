@@ -20,7 +20,7 @@ under each other's feet. One feature = one worktree = one pane, named after the 
    spawn — enter the worktree in THIS session with the **EnterWorktree tool**
    (`name: <slug>`) and build here. Skip the pane steps.
 
-3. **Derive a short kebab-case slug** from the request ("add a diff view to herdr-aa-git" →
+3. **Derive a short kebab-case slug** from the request ("add a diff view to herdr-sidebar" →
    `git-diff-view`).
 
 4. **Spawn the feature's pane, then hand it the task.** Do this from the current session;
@@ -137,7 +137,7 @@ under each other's feet. One feature = one worktree = one pane, named after the 
       ```
 
 5. **Implement** inside the worktree, commit on the `<slug>` branch. Work happens inside the
-   affected plugin directory (`plugins/herdr-aa-filetree` or `plugins/herdr-aa-git`) — build, test,
+   plugin directory (`plugins/herdr-sidebar`) — build, test,
    and lint there before calling it done:
    ```bash
    cargo build --release && cargo test && cargo clippy -- -D warnings

@@ -147,6 +147,8 @@ struct Pane {
     #[serde(default)]
     tab_id: String,
     #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
     focused: bool,
     #[serde(default)]
     tokens: serde_json::Value,
@@ -335,6 +337,7 @@ fn focus_destination(panes: &[Pane], sidebar_focused: bool) -> Option<String> {
     let focused = panes.iter().find(|pane| pane.focused)?;
     let is_sidebar = |pane: &&Pane| {
         pane.tab_id == focused.tab_id
+            && pane.agent.is_none()
             && token_string(&pane.tokens, "herdr-sidebar-explorer").is_some()
             && token_string(&pane.tokens, "herdr-sidebar-git").is_some()
     };
@@ -480,6 +483,7 @@ mod tests {
                 pane_id: "sidebar".into(),
                 workspace_id: "w".into(),
                 tab_id: "t".into(),
+                agent: None,
                 focused: false,
                 tokens: serde_json::json!({
                     "herdr-sidebar-explorer": "1",
@@ -490,6 +494,7 @@ mod tests {
                 pane_id: "content".into(),
                 workspace_id: "w".into(),
                 tab_id: "t".into(),
+                agent: None,
                 focused: true,
                 tokens: serde_json::json!({}),
             },
@@ -502,6 +507,16 @@ mod tests {
             Pane { focused: false, ..panes[1].clone() },
         ];
         assert_eq!(focus_destination(&panes, false).as_deref(), Some("content"));
+
+        let panes = vec![
+            Pane {
+                agent: Some("pi".into()),
+                focused: true,
+                ..panes[0].clone()
+            },
+            Pane { focused: false, ..panes[1].clone() },
+        ];
+        assert_eq!(focus_destination(&panes, true), None);
     }
 
 }

@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn historical_files_use_real_git_rename_stats_and_follow_paths() {
         let root = std::env::temp_dir().join(format!(
-            "aa-git-history-files-{}",
+            "herdr-sidebar-git-history-files-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     fn stash_files_include_tracked_and_saved_untracked_snapshots() {
         let root = std::env::temp_dir().join(format!(
-            "aa-git-stash-files-{}",
+            "herdr-sidebar-git-stash-files-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn discover_all_finds_child_repos_and_dedupes() {
-        let base = std::env::temp_dir().join(format!("aa-git-scan-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("herdr-sidebar-git-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         // base is NOT a repo; two children are (one nested two levels down),
         // and a `.git`-less child is ignored.
@@ -847,7 +847,7 @@ mod tests {
 
     /// A fresh repo with one commit on `main`, so HEAD resolves.
     fn repo_with_head(name: &str) -> Git {
-        let root = std::env::temp_dir().join(format!("aa-git-unstage-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("herdr-sidebar-git-unstage-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         for args in [
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn unstage_all_falls_back_on_a_genuinely_unborn_branch() {
         let root = std::env::temp_dir()
-            .join(format!("aa-git-unstage-unborn-{}", std::process::id()));
+            .join(format!("herdr-sidebar-git-unstage-unborn-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).output().unwrap();

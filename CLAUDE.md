@@ -38,6 +38,9 @@ cargo clippy -- -D warnings
   herdr; `herdr plugin list --json` shows what's registered.
 - `herdr plugin action list` / `herdr plugin action invoke <plugin>.<action>` run manifest actions.
 - `herdr plugin log list --plugin <id>` shows plugin logs.
+- Redeploy scripts must **skip panes that already advertise an `agent` in `pane list`** even if
+  they still carry a stale Sidebar label/token from an old plugin session; otherwise `redeploy`
+  can close a user-repurposed Pi/Claude pane instead of only the real plugin pane.
 - Manifest format: `herdr-plugin.toml` (`[[build]]`, `[[panes]]`, `[[actions]]`).
 - herdr.dev/docs/plugins lists an `[[actions]]` `contexts` field as REQUIRED, but no
   working plugin ships it (checked herdr-file-viewer, herdr-spreader, ours, herdr-notes)
@@ -91,7 +94,7 @@ cargo clippy -- -D warnings
   serves all workspaces), but stale panes keep old binaries AND a dead-but-open Explorer/Sidebar
   pane blocks the ensure hook's re-dock (it matches by label/token, not liveness). Run
   `herdr plugin action invoke herdr-sidebar.redeploy-windows` after rebuilding: it closes
-  every herdr-aa pane in every workspace, kills stragglers, and re-docks the focused workspace;
+  every Sidebar pane in every workspace, kills stragglers, and re-docks the focused workspace;
   the others re-dock via the focus hook the moment they're next visited.
 - **os error 5 can come from ANOTHER Windows account**: if a second account's herdr session
   runs sidebar panes from this same checkout, its processes show empty Path/StartTime in
@@ -230,6 +233,11 @@ Pane identity & titles:
   numbers are rejected with `invalid_request` (and a `let _ =` swallows it silently). A `source` can also report tokens whose
   keys belong to another plugin's namespace (the merged Sidebar pane reports both plugins'
   identity tokens so both launchers recognize the one pane).
+- A pane later reused for a real agent session can KEEP an old Sidebar label/token forever.
+  Launchers, redeploy scripts, and workspace-focus restoration must therefore ignore any
+  pane whose `pane list` entry already has an `agent`, even if its label/tokens still look
+  like `Sidebar` / `herdr-sidebar-*`; otherwise the plugin mistakes the agent pane for a live
+  sidebar, refuses to open a new one, or closes the user's agent pane during redeploy.
 - Pane border titles come from `border_label`: metadata title → manual label (`pane rename`)
   → detected-agent label. The raw terminal (OSC) title is NOT used — clear the label on a
   non-agent pane and the border shows **no title at all**.
@@ -611,7 +619,7 @@ end-to-end twice:
 
 0. **Shared backdrop (shoot session)** — shots are taken in the isolated
    `herdr --session shoot` server so herdr's left chrome shows a DUMMY roster, kept
-   IDENTICAL to the herdr-aa-notes repo's shots (mirrored in that repo's CLAUDE.md):
+   IDENTICAL to the herdr-notes repo's shots (mirrored in that repo's CLAUDE.md):
    spaces `acme-app [main ↑1]` / `acme-api [main]` / `acme-web [dev]` /
    `billing-service [main]`; agents in acme-app's 2×2 grid: `auth-refactor` (claude),
    `checkout-tests` (codex), `api-docs` (codex, unsubmitted composer text),

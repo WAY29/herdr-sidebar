@@ -1,4 +1,4 @@
-# open-git-panel.ps1 -- Windows launcher for the herdr-aa-git source control pane.
+# open-git-panel.ps1 -- Windows launcher for the herdr-sidebar source control pane.
 #
 # Idempotent "launch-or-focus, toggle on repeat", scoped to the current tab:
 #   - no Source Control pane in the current tab      -> open one, DOCKED ON THE LEFT edge
@@ -8,7 +8,7 @@
 # Left dock: herdr's `pane split` only splits right/down, so we split the tab's
 # LEFTMOST pane (the one touching the spaces/agents sidebar) to the right with a
 # small left-slot ratio, then `pane swap` the new pane into that left slot.
-# Verified against herdr 0.7.1 (by herdr-aa-filetree, whose launcher this mirrors):
+# Verified against herdr 0.7.1 (this mirrors the Explorer dock path):
 # the split `--ratio` is the ORIGINAL pane's share, and after a swap the focus
 # stays with the SLOT, not the pane.
 #

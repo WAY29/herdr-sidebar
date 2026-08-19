@@ -10,8 +10,8 @@
 # LEFTMOST pane (the one touching the spaces/agents sidebar) to the right with a
 # small left-slot ratio, then `pane swap` the new pane into that left slot. The
 # split `--ratio` is the ORIGINAL pane's share; after a swap, focus stays with
-# the SLOT, not the pane (both verified against herdr 0.7.1 by herdr-aa-filetree,
-# whose launcher this mirrors).
+# the SLOT, not the pane (verified against herdr 0.7.1; this launcher mirrors
+# the Explorer dock path).
 #
 # All ids/ratios come from the binary's unit-tested stdin modes
 # (--launch-decision git / --focused-pane / --open-plan), never ad-hoc JSON parsing;

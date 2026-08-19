@@ -161,7 +161,7 @@ mod tests {
 
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("aa-filetree-{}-{tag}", std::process::id()));
+            let path = std::env::temp_dir().join(format!("herdr-sidebar-tree-{}-{tag}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn unreadable_or_missing_dir_is_empty() {
-        let mut tree = Tree::new(std::env::temp_dir().join("aa-filetree-does-not-exist"));
+        let mut tree = Tree::new(std::env::temp_dir().join("herdr-sidebar-tree-does-not-exist"));
         assert!(tree.rows().is_empty());
     }
 
@@ -276,6 +276,6 @@ mod tests {
     fn root_name_uses_final_component() {
         let tmp = TempDir::new("rootname");
         let tree = Tree::new(tmp.0.clone());
-        assert!(tree.root_name().starts_with("aa-filetree-"));
+        assert!(tree.root_name().starts_with("herdr-sidebar-tree-"));
     }
 }

@@ -3,7 +3,7 @@
 # Windows locks a running exe, so a successful `cargo build --release` implies
 # the old TUI processes are already dead -- but their PANES linger, and a
 # lingering Explorer/Sidebar pane blocks the ensure hook from re-docking a
-# fresh one. This closes every herdr-aa pane in EVERY workspace and kills any
+# fresh one. This closes every Sidebar pane in EVERY workspace and kills any
 # straggler processes; the tab/workspace-focus hooks then re-dock fresh panes
 # (running the newest binaries) the moment each workspace is next focused.
 #
@@ -18,6 +18,7 @@ $OutputEncoding = $Utf8NoBom
 $HerdrBin = if ($env:HERDR_BIN_PATH) { $env:HERDR_BIN_PATH } else { 'herdr' }
 
 $Labels = @('Explorer', 'Source Control', 'Sidebar', 'Preview')
+$TokenPrefixes = @('herdr-sidebar')
 
 $workspaces = (& $HerdrBin workspace list | Out-String | ConvertFrom-Json).result.workspaces
 foreach ($ws in $workspaces) {
@@ -26,10 +27,16 @@ foreach ($ws in $workspaces) {
         $isPlugin = $Labels -contains $pane.label
         if (-not $isPlugin -and $pane.tokens) {
             foreach ($name in $pane.tokens.PSObject.Properties.Name) {
-                if ($name -like 'herdr-aa*') { $isPlugin = $true; break }
+                foreach ($prefix in $TokenPrefixes) {
+                    if ($name -like "$prefix*") {
+                        $isPlugin = $true
+                        break
+                    }
+                }
+                if ($isPlugin) { break }
             }
         }
-        if ($isPlugin) {
+        if ($isPlugin -and -not $pane.agent) {
             & $HerdrBin pane close $pane.pane_id *> $null
             Write-Output "closed $($ws.workspace_id) $($pane.pane_id) ($($pane.label))"
         }

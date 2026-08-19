@@ -38,6 +38,8 @@ struct Pane {
     label: Option<String>,
     cwd: Option<String>,
     #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
     focused: bool,
     tab_id: Option<String>,
     /// Metadata tokens reported via `pane.report_metadata`; shape of the
@@ -47,14 +49,19 @@ struct Pane {
 }
 
 impl Pane {
+    fn is_agent(&self) -> bool {
+        self.agent.as_deref().is_some_and(|agent| !agent.is_empty())
+    }
+
     /// An Explorer is recognized by its metadata token (reported by the TUI at
     /// startup — survives the label being cleared while collapsed) or by the
     /// "Explorer" label (present from the moment the launcher renames the
     /// fresh pane, before the TUI has reported its token).
     fn is_explorer(&self) -> bool {
-        self.tokens.contains_key(METADATA_SOURCE)
-            || self.label.as_deref() == Some(PANE_LABEL)
-            || self.label.as_deref() == Some(SIDEBAR_LABEL)
+        !self.is_agent()
+            && (self.tokens.contains_key(METADATA_SOURCE)
+                || self.label.as_deref() == Some(PANE_LABEL)
+                || self.label.as_deref() == Some(SIDEBAR_LABEL))
     }
 
     /// One of OUR labels with NO heartbeat token is a corpse. The main way
@@ -65,7 +72,8 @@ impl Pane {
     /// fresh spawn for ~a second — REPLACE just respawns, and the next pass
     /// sees a live token, so the race self-heals.)
     fn our_label_without_token(&self) -> bool {
-        matches!(self.label.as_deref(), Some("Sidebar" | "Explorer"))
+        !self.is_agent()
+            && matches!(self.label.as_deref(), Some("Sidebar" | "Explorer"))
             && !self.tokens.contains_key(METADATA_SOURCE)
     }
 }
@@ -193,7 +201,8 @@ pub fn launch_decision_git(pane_list_json: &str, now: u64) -> String {
         return "OPEN".to_string();
     };
     let panel = panes.iter().find(|p| {
-        (p.tokens.contains_key(SC_METADATA_SOURCE) || p.label.as_deref() == Some(SC_PANE_LABEL))
+        !p.is_agent()
+            && (p.tokens.contains_key(SC_METADATA_SOURCE) || p.label.as_deref() == Some(SC_PANE_LABEL))
             && p.tab_id.as_deref() == focused.tab_id.as_deref()
     });
     let Some(pane) = panel else {
@@ -497,6 +506,15 @@ mod tests {
             r#"{"pane_id":"w1:p2","label":"Explorer","tab_id":"w1:t1","focused":true,"tokens":{"herdr-sidebar-explorer":95}}"#,
         );
         assert_eq!(launch_decision(&json, 100), "CLOSE w1:p2");
+    }
+
+    #[test]
+    fn agent_pane_with_sidebar_label_is_ignored() {
+        let json = pane_list(
+            r#"{"pane_id":"w1:p1","tab_id":"w1:t1","focused":true},{"pane_id":"w1:p2","label":"Sidebar","tab_id":"w1:t1","agent":"pi","tokens":{"herdr-sidebar-explorer":95,"herdr-sidebar-git":95}}"#,
+        );
+        assert_eq!(launch_decision(&json, 100), "OPEN");
+        assert_eq!(launch_decision_git(&json, 100), "OPEN");
     }
 
     #[test]
