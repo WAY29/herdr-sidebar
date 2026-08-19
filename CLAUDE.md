@@ -602,6 +602,10 @@ HACKING.md — budget time for that before promising a patched build.
   red/green semantic colors. Foreground colors only: the terminal owns the base background, so light
   themes depend on a compatible terminal palette. See `src/syntax.rs`; unknown extensions fall back
   to plain lines.
+- **Ratatui does not expand source tabs into editor-width cells**: Go files expose this because
+  `gofmt` uses tabs while Rust normally uses spaces. Preview and structured diff rendering expand
+  styled spans to 4-column tab stops only AFTER byte-offset-based Search/word-diff highlighting,
+  and before adding the line-number gutter. The source file is never reformatted or rewritten.
 
 ### Verifying a plugin TUI end-to-end
 

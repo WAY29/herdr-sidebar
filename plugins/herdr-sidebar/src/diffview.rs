@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::syntax::{DiffTheme, LineHighlighter};
+use crate::syntax::{expand_tabs, DiffTheme, LineHighlighter};
 
 /// Stable Catppuccin semantic layers; the selected Diff theme supplies code
 /// foregrounds while red/green remains recognizable across themes.
@@ -368,7 +368,7 @@ pub fn render_expanded(
             ))),
             Ev::Ctx(_o, n, t) => {
                 old_hl.line(t);
-                let spans = new_hl.line(t);
+                let spans = expand_tabs(new_hl.line(t));
                 let mut all = gutter(Some(*n), None);
                 all.extend(spans);
                 lines.push(Line::from(all));
@@ -379,6 +379,7 @@ pub fn render_expanded(
                 if let Some(&range) = ranges.get(&idx) {
                     spans = overlay_bg(spans, range, DEL_WORD_BG);
                 }
+                spans = expand_tabs(spans);
                 let mut all = gutter(Some(*o), Some(DEL_MARK));
                 all.extend(spans);
                 lines.push(Line::from(all).style(Style::default().bg(DEL_BG)));
@@ -389,6 +390,7 @@ pub fn render_expanded(
                 if let Some(&range) = ranges.get(&idx) {
                     spans = overlay_bg(spans, range, ADD_WORD_BG);
                 }
+                spans = expand_tabs(spans);
                 let mut all = gutter(Some(*n), Some(ADD_MARK));
                 all.extend(spans);
                 lines.push(Line::from(all).style(Style::default().bg(ADD_BG)));

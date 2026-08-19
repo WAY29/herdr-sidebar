@@ -588,6 +588,9 @@ fn load_file_inner(
                 if let Some(search_re) = search_re.as_ref() {
                     apply_search_highlights(&mut lines, &text, search_re);
                 }
+                for line in &mut lines {
+                    line.spans = crate::syntax::expand_tabs(std::mem::take(&mut line.spans));
+                }
                 if truncated || text.lines().count() > MAX_LINES {
                     lines.push(Line::raw("… (truncated)"));
                 }
@@ -1822,6 +1825,23 @@ mod tests {
             Some(Request::File(PathBuf::from("C:/plain.txt")))
         );
         assert_eq!(parse_request("  "), None);
+    }
+
+    #[test]
+    fn go_file_preview_expands_tabs_without_reformatting_source() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-sidebar-go-preview-tabs-{}.go",
+            std::process::id()
+        ));
+        let source = "func main() {\n\tif true {\n\t\tprintln(\"ok\")\n\t}\n}\n";
+        std::fs::write(&path, source).unwrap();
+
+        let doc = load_file(&path, crate::syntax::DEFAULT_DIFF_THEME);
+
+        assert_eq!(doc.lines[1].to_string(), "    if true {");
+        assert_eq!(doc.lines[2].to_string(), "        println(\"ok\")");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -38,6 +38,36 @@ pub fn diff_theme_index(theme: DiffTheme) -> usize {
 /// can take tens of seconds and freeze the render thread.
 const MAX_HIGHLIGHT_LINE_LEN: usize = 2000;
 
+/// Match VS Code's default Go indentation width. Ratatui does not expand tab
+/// characters into terminal cells, so tabs must be converted after any
+/// byte-offset-based highlighting has already been applied.
+const TAB_WIDTH: usize = 4;
+
+pub fn expand_tabs(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let mut column = 0usize;
+    spans
+        .into_iter()
+        .map(|span| {
+            if !span.content.contains('\t') {
+                column += span.width();
+                return span;
+            }
+            let mut expanded = String::new();
+            let mut parts = span.content.split('\t').peekable();
+            while let Some(part) = parts.next() {
+                expanded.push_str(part);
+                column += Span::raw(part).width();
+                if parts.peek().is_some() {
+                    let spaces = TAB_WIDTH - column % TAB_WIDTH;
+                    expanded.push_str(&" ".repeat(spaces));
+                    column += spaces;
+                }
+            }
+            Span::styled(expanded, span.style)
+        })
+        .collect()
+}
+
 /// Grammar + theme assets, loaded once (the bundled dumps take a few ms).
 fn assets() -> &'static (SyntaxSet, EmbeddedLazyThemeSet) {
     static ASSETS: OnceLock<(SyntaxSet, EmbeddedLazyThemeSet)> = OnceLock::new();
@@ -161,6 +191,17 @@ mod tests {
             .any(|s| s.content.contains("fn") && s.style.fg.is_some());
         assert!(colored, "expected a colored keyword span");
         assert_eq!(lines[0].to_string(), "fn main() {}");
+    }
+
+    #[test]
+    fn tabs_expand_to_four_column_stops_across_styled_spans() {
+        let red = Style::default().fg(Color::Red);
+        let blue = Style::default().fg(Color::Blue);
+        let spans = expand_tabs(vec![Span::styled("\tif", red), Span::styled("\tvalue", blue)]);
+
+        assert_eq!(Line::from(spans.clone()).to_string(), "    if  value");
+        assert_eq!(spans[0].style, red);
+        assert_eq!(spans[1].style, blue);
     }
 
     #[test]
