@@ -367,9 +367,11 @@ HACKING.md — budget time for that before promising a patched build.
 - Unified Sidebar panes with the SAME canonical root mirror their visual state across tabs in
   one workspace through replace-on-write files under `state-dir/workspace-sync/`. The shared state uses
   semantic anchors, not row indices: active Explorer/SCM view, selected/top path or SCM row,
-  tree/repo/drawer/ref expansion, Sidebar width, and list/message focus. Preview, overlays,
-  hover, mouse position, notices, and commit-message text stay tab-local. Different roots use
-  different state files and deliberately do not sync. Background panes apply shared state but
+  tree/repo/drawer/ref expansion, Sidebar width, and list/message focus. SCM top anchors also
+  store their offset from the actual viewport top so display-only rows such as multi-repo
+  separators are not dropped during restoration. Preview, overlays, hover, mouse position,
+  notices, and commit-message text stay tab-local. Different roots use different state files and
+  deliberately do not sync. Background panes apply shared state but
   publish only after local input (or a focused Sidebar's async completion), so Git refreshes in
   hidden tabs cannot overwrite the active tab. A separate workspace focus-role file lets the
   `tab.focused` / `workspace.focused` ensure hook focus the destination Sidebar, or move off it

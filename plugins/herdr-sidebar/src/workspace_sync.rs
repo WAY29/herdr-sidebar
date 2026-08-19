@@ -88,6 +88,8 @@ pub struct ScmState {
     pub focus: ScmFocus,
     pub selected: Option<ScmAnchor>,
     pub top: Option<ScmAnchor>,
+    #[serde(default)]
+    pub top_offset: usize,
     pub repos: Vec<ScmRepoState>,
     pub drawers: BTreeSet<ScmDrawer>,
     pub expanded_ref: Option<ExpandedScmRef>,
@@ -451,6 +453,14 @@ mod tests {
         };
         let json = serde_json::to_string(&state).unwrap();
         assert_eq!(serde_json::from_str::<WorkspaceState>(&json).unwrap(), state);
+    }
+
+    #[test]
+    fn old_scm_state_defaults_the_top_anchor_offset() {
+        let mut json = serde_json::to_value(ScmState::default()).unwrap();
+        json.as_object_mut().unwrap().remove("top_offset");
+        let state = serde_json::from_value::<ScmState>(json).unwrap();
+        assert_eq!(state.top_offset, 0);
     }
 
     #[test]

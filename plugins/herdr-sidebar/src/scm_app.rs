@@ -986,9 +986,7 @@ impl App {
 
     pub fn workspace_state(&self) -> ScmState {
         let selected = self.selected.and_then(|index| self.anchor_at(index));
-        let top = (self.scroll..self.rows.len())
-            .find_map(|index| self.anchor_at(index))
-            .or_else(|| (0..self.scroll).rev().find_map(|index| self.anchor_at(index)));
+        let (top, top_offset) = self.top_anchor();
         ScmState {
             active_repo: self.active_repo().map(|repo| repo.git.root().to_path_buf()),
             focus: match self.focus {
@@ -998,6 +996,7 @@ impl App {
             },
             selected,
             top,
+            top_offset,
             repos: self
                 .repos
                 .iter()
@@ -1045,10 +1044,8 @@ impl App {
         };
         if !structure_changed && !history_changed {
             self.selected = state.selected.as_ref().and_then(|anchor| self.find_anchor(anchor));
-            self.scroll = state
-                .top
-                .as_ref()
-                .and_then(|anchor| self.find_anchor(anchor))
+            self.scroll = self
+                .find_top(state)
                 .unwrap_or_else(|| self.selected.unwrap_or(0))
                 .min(self.rows.len().saturating_sub(1));
             self.snap = false;
@@ -1096,10 +1093,8 @@ impl App {
             }
         }
         self.selected = state.selected.as_ref().and_then(|anchor| self.find_anchor(anchor));
-        self.scroll = state
-            .top
-            .as_ref()
-            .and_then(|anchor| self.find_anchor(anchor))
+        self.scroll = self
+            .find_top(state)
             .unwrap_or_else(|| self.selected.unwrap_or(0))
             .min(self.rows.len().saturating_sub(1));
         self.snap = false;
@@ -1160,6 +1155,23 @@ impl App {
             .iter()
             .enumerate()
             .find_map(|(index, _)| (self.anchor_at(index).as_ref() == Some(anchor)).then_some(index))
+    }
+
+    fn top_anchor(&self) -> (Option<ScmAnchor>, usize) {
+        for index in self.scroll..self.rows.len() {
+            if let Some(anchor) = self.anchor_at(index) {
+                return (Some(anchor), index - self.scroll);
+            }
+        }
+        (
+            (0..self.scroll).rev().find_map(|index| self.anchor_at(index)),
+            0,
+        )
+    }
+
+    fn find_top(&self, state: &ScmState) -> Option<usize> {
+        let index = self.find_anchor(state.top.as_ref()?)?;
+        Some(index.saturating_sub(state.top_offset))
     }
 
     fn repo_root(&self, repo: usize) -> Option<PathBuf> {
@@ -4859,6 +4871,48 @@ mod tests {
         let mut target = App::new_with_pane(root.clone(), None);
         target.apply_workspace_state(&expected);
         assert_eq!(target.workspace_state(), expected);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_state_keeps_the_multi_repo_separator_above_the_top_anchor() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-scm-sync-separator-{}",
+            std::process::id()
+        ));
+        let child = root.join("packages/child");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "root\n").unwrap();
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "--quiet", "-m", "root"]);
+
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("lib.rs"), "pub fn child() {}\n").unwrap();
+        git(&child, &["init", "--quiet"]);
+        git(&child, &["config", "user.email", "test@example.com"]);
+        git(&child, &["config", "user.name", "Test"]);
+        git(&child, &["add", "."]);
+        git(&child, &["commit", "--quiet", "-m", "child"]);
+
+        let mut source = App::new_with_pane(root.clone(), None);
+        assert!(source.multi());
+        assert!(matches!(source.rows.first(), Some(Row::RepoSeparator)));
+        source.scroll = 0;
+        let shared = source.workspace_state();
+        assert_eq!(shared.top_offset, 1);
+        assert!(matches!(shared.top, Some(ScmAnchor::Repo(_))));
+
+        let mut target = App::new_with_pane(root.clone(), None);
+        target.scroll = 4;
+        target.apply_workspace_state(&shared);
+        assert_eq!(target.scroll, 0);
+        assert!(matches!(target.rows.first(), Some(Row::RepoSeparator)));
+        assert_eq!(target.workspace_state(), shared);
 
         let _ = std::fs::remove_dir_all(root);
     }
