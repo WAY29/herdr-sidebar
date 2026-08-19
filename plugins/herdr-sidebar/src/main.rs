@@ -2,12 +2,13 @@
 //! control in ONE binary. In unified mode both views share a pane and the
 //! activity bar switches between them IN PROCESS (instant, no flash); in
 //! separated mode the same binary runs one pane per view, pinned with
-//! `--view explorer|git`. `--preview <ctl>` runs the file-preview pane.
+//! `--view explorer|git|search`. `--preview <ctl>` runs the file-preview pane.
 //!
 //! The `--*` stdin→stdout helper modes serve the launcher scripts — see
 //! launch.rs.
 
 mod explorer_app;
+mod search_app;
 mod scm_app;
 
 use std::io::Read;
@@ -68,7 +69,7 @@ fn main() -> std::io::Result<()> {
         Some(other) => {
             eprintln!("herdr-sidebar: unknown argument `{other}`");
             eprintln!(
-                "usage: herdr-sidebar [--view explorer|git|--preview <ctl>|--launch-decision [git]|--focused-pane|--open-plan|--focused-tab|--auto-open]"
+                "usage: herdr-sidebar [--view explorer|git|search|--preview <ctl>|--launch-decision [git]|--focused-pane|--open-plan|--focused-tab|--auto-open]"
             );
             std::process::exit(2);
         }
@@ -129,6 +130,7 @@ fn main() -> std::io::Result<()> {
         let exit = match view {
             View::Explorer => run_explorer(&mut terminal, &mut sync),
             View::SourceControl => run_scm(&mut terminal, &mut sync),
+            View::Search => run_search(&mut terminal, &mut sync),
         };
         match exit {
             Ok(Exit::Quit) => break Ok(()),
@@ -137,7 +139,7 @@ fn main() -> std::io::Result<()> {
                     .as_ref()
                     .and_then(SyncSession::latest)
                     .map(|state| state.active)
-                    .unwrap_or_else(|| view.other());
+                    .unwrap_or_else(|| state::load_state().active);
             }
             Err(e) => break Err(e),
         }
@@ -278,8 +280,13 @@ fn run_explorer(
             if let Some(exit) = exit {
                 if let Some(session) = sync.as_mut() {
                     session.set_root(&app.root());
+                    let active = if exit == Exit::Switch {
+                        state::load_state().active
+                    } else {
+                        View::Explorer
+                    };
                     session.publish_explorer(
-                        if exit == Exit::Switch { View::SourceControl } else { View::Explorer },
+                        active,
                         app.workspace_width(),
                         app.workspace_state(),
                     );
@@ -435,8 +442,13 @@ fn run_scm(
             if let Some(exit) = exit {
                 if let Some(session) = sync.as_mut() {
                     session.set_root(&app.root());
+                    let active = if exit == Exit::Switch {
+                        state::load_state().active
+                    } else {
+                        View::SourceControl
+                    };
                     session.publish_scm(
-                        if exit == Exit::Switch { View::Explorer } else { View::SourceControl },
+                        active,
                         app.workspace_width(),
                         app.workspace_state(),
                     );
@@ -468,6 +480,160 @@ fn run_scm(
         {
             session.set_root(&after_root);
             session.publish_scm(View::SourceControl, app.workspace_width(), after);
+        }
+    }
+}
+
+fn run_search(
+    terminal: &mut ratatui::DefaultTerminal,
+    sync: &mut Option<SyncSession>,
+) -> std::io::Result<Exit> {
+    let cwd = std::env::current_dir()?;
+    let mut app = search_app::App::new(cwd);
+    configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+    let mut preview = viewer::InlinePreview::for_current_pane();
+    let mut target_width = None;
+    let mut width_dirty = false;
+    let mut ignore_resize_until = None;
+    let mut needs_initial_publish = sync
+        .as_ref()
+        .and_then(SyncSession::latest)
+        .and_then(|state| state.search.as_ref())
+        .is_none();
+    if let Some(shared) = sync.as_ref().and_then(SyncSession::latest).cloned()
+        && shared.active == View::Search
+    {
+        if let Some(search) = &shared.search {
+            app.apply_workspace_state(search);
+        }
+        target_width = Some(shared.width);
+    }
+    loop {
+        configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+        if let Some(session) = sync.as_mut() {
+            session.set_unified(app.workspace_sync_enabled());
+            session.set_root(&app.root());
+            if !app.has_overlay() && !preview.is_open()
+                && let Some(shared) = session.poll()
+            {
+                if shared.active != View::Search {
+                    return Ok(Exit::Switch);
+                }
+                if let Some(search) = &shared.search {
+                    app.apply_workspace_state(search);
+                }
+                target_width = Some(shared.width);
+            }
+        }
+        preview.sync();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            if let Some((sidebar, viewer)) = preview.areas(area) {
+                app.draw_in(frame, sidebar);
+                preview.draw(frame, viewer);
+            } else {
+                app.draw(frame);
+            }
+        })?;
+        let width = app.workspace_width();
+        if !preview.is_open() {
+            if let Some(target) = target_width.take() {
+                if target > 0 && target != width {
+                    app.apply_workspace_width(target);
+                    ignore_resize_until = Some(Instant::now() + Duration::from_secs(1));
+                }
+                width_dirty = false;
+            } else if needs_initial_publish {
+                if let Some(session) = sync.as_mut() {
+                    session.publish_search(View::Search, width, app.workspace_state());
+                }
+                needs_initial_publish = false;
+            } else if width_dirty {
+                if let Some(session) = sync.as_mut() {
+                    session.publish_active(View::Search, width);
+                }
+                width_dirty = false;
+            }
+        }
+        let before_root = app.root();
+        let before = app.workspace_state();
+        let had_event = if event::poll(Duration::from_millis(100))? {
+            let event = event::read()?;
+            if matches!(event, Event::Resize(..)) {
+                if ignore_resize_until.is_some_and(|until| Instant::now() <= until) {
+                    ignore_resize_until = None;
+                } else {
+                    width_dirty = true;
+                }
+            }
+            note_sync_focus(sync, &event);
+            let exit = match event {
+                Event::Key(key) if preview.is_open() && !app.has_overlay() => {
+                    preview.on_key(key);
+                    None
+                }
+                Event::Mouse(mouse) if preview.owns_mouse(&mouse) => {
+                    preview.on_mouse(mouse);
+                    None
+                }
+                Event::Key(key) => {
+                    preview.claim_focus();
+                    app.on_key(key)
+                }
+                Event::Mouse(mouse) => {
+                    preview.observe_mouse();
+                    let exit = app.on_mouse(mouse);
+                    preview.sync();
+                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        preview.claim_focus();
+                    }
+                    exit
+                }
+                Event::FocusGained => {
+                    preview.claim_focus();
+                    None
+                }
+                Event::FocusLost => {
+                    app.on_focus_lost();
+                    preview.on_focus_lost();
+                    None
+                }
+                _ => None,
+            };
+            if app.take_redraw_request() {
+                terminal.clear()?;
+            }
+            if let Some(exit) = exit {
+                if let Some(session) = sync.as_mut() {
+                    session.set_root(&app.root());
+                    let active = if exit == Exit::Switch {
+                        state::load_state().active
+                    } else {
+                        View::Search
+                    };
+                    session.publish_search(active, app.workspace_width(), app.workspace_state());
+                    if exit == Exit::Quit {
+                        session.clear_focus();
+                    }
+                }
+                return Ok(exit);
+            }
+            true
+        } else {
+            false
+        };
+        app.tick();
+        app.heartbeat();
+        preview.sync();
+        preview.tick();
+        let after_root = app.root();
+        let after = app.workspace_state();
+        let can_publish = had_event || sync.as_ref().is_some_and(SyncSession::pane_focused);
+        if (before_root != after_root || before != after) && can_publish
+            && let Some(session) = sync.as_mut()
+        {
+            session.set_root(&after_root);
+            session.publish_search(View::Search, app.workspace_width(), after);
         }
     }
 }

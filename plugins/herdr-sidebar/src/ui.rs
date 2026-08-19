@@ -19,6 +19,28 @@ use crate::state::View;
 pub const KEYCAP_BG: Color = Color::Rgb(0x32, 0x36, 0x3d);
 pub const KEYCAP_FG: Color = Color::Rgb(0xc9, 0xce, 0xd6);
 
+/// Shared icon-button styling: transparent at rest, background-highlighted
+/// on hover, and dimmed without hover when disabled.
+pub fn icon_button_style(hovered: bool, enabled: bool) -> Style {
+    if !enabled {
+        Style::default().dim()
+    } else if hovered {
+        Style::default().bg(KEYCAP_BG)
+    } else {
+        Style::default().dim()
+    }
+}
+
+/// Activity buttons keep their selected chip while inactive views use the
+/// same hover background as every other icon button.
+pub fn activity_button_style(active: bool, hovered: bool) -> Style {
+    if active {
+        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        icon_button_style(hovered, true)
+    }
+}
+
 /// Rendered width of one `key label` hint: keycap padding + gap + label.
 fn hint_width(key: &str, label: &str) -> usize {
     Span::raw(key).width() + 2 + 1 + Span::raw(label).width()
@@ -163,13 +185,13 @@ pub fn hits_collapse_button(column: u16, row: u16, pane_width: u16, pane_height:
     row == pane_height.saturating_sub(1) && column >= pane_width.saturating_sub(4)
 }
 
-/// Theme-matched activity-bar icons: (explorer, source control). Both FA
-/// glyphs render two cells wide in the non-Mono Nerd Font — chips reserve
-/// the second cell (see the activity-bar renderer).
-pub fn activity_icons(theme: IconTheme) -> (&'static str, &'static str) {
+/// Theme-matched activity-bar icons: (explorer, source control, search).
+/// The Nerd Font build may render these glyphs two cells wide — chips reserve
+/// the slack cell in the callers' activity-bar renderers.
+pub fn activity_icons(theme: IconTheme) -> (&'static str, &'static str, &'static str) {
     match theme {
-        IconTheme::Material => ("\u{f07b}", "\u{f126}"),
-        IconTheme::Emoji => ("📁", "🔀"),
+        IconTheme::Material => ("\u{f07b}", "\u{f126}", "\u{f002}"),
+        IconTheme::Emoji => ("📁", "🔀", "🔎"),
     }
 }
 
@@ -271,11 +293,7 @@ pub fn title_action_spans(
         let chip = title_action_chip(theme, action);
         let w = Span::raw(chip.as_str()).width() as u16;
         let rect = Rect::new(cx, y, w, 1);
-        let style = if hover.is_some_and(|(hx, hy)| hits(rect, hx, hy)) {
-            Style::default().bg(KEYCAP_BG)
-        } else {
-            Style::default().dim()
-        };
+        let style = icon_button_style(hover.is_some_and(|(hx, hy)| hits(rect, hx, hy)), true);
         spans.push(Span::styled(chip, style));
         zones.push((rect, action));
         cx += w;
@@ -294,11 +312,7 @@ pub fn redraw_button(
 ) -> (Span<'static>, Rect) {
     let chip = title_action_chip(theme, TitleAction::Refresh);
     let rect = Rect::new(x, y, Span::raw(chip.as_str()).width() as u16, 1);
-    let style = if hover.is_some_and(|(hx, hy)| hits(rect, hx, hy)) {
-        Style::default().bg(KEYCAP_BG)
-    } else {
-        Style::default().dim()
-    };
+    let style = icon_button_style(hover.is_some_and(|(hx, hy)| hits(rect, hx, hy)), true);
     (Span::styled(chip, style), rect)
 }
 
@@ -433,6 +447,15 @@ pub fn sibling_panes_of(pane_list_json: &str, my_pane_id: &str, other: View) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_buttons_use_background_only_for_hover() {
+        assert_eq!(icon_button_style(false, true).bg, None);
+        assert_eq!(icon_button_style(true, true).bg, Some(KEYCAP_BG));
+        assert_eq!(activity_button_style(false, false).bg, None);
+        assert_eq!(activity_button_style(false, true).bg, Some(KEYCAP_BG));
+        assert_eq!(activity_button_style(true, false).bg, Some(Color::DarkGray));
+    }
 
     #[test]
     fn messages_wrap_to_narrow_panes() {

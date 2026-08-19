@@ -17,10 +17,10 @@ use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
-    TitleAction, activity_icons, draw_option_picker, draw_scrollbar, gear_icon, hits,
-    hits_collapse_button, input_tail, option_picker_index, redraw_button, sibling_panes_of,
-    title_action_spans, title_actions_visible, title_actions_width, truncate_to,
-    wrap_footer_message, wrap_hints,
+    TitleAction, activity_button_style, activity_icons, draw_option_picker, draw_scrollbar,
+    gear_icon, hits, hits_collapse_button, icon_button_style, input_tail, option_picker_index,
+    redraw_button, sibling_panes_of, title_action_spans, title_actions_visible,
+    title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
 };
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::workspace_sync::ExplorerState;
@@ -225,12 +225,13 @@ struct ActivityZones {
     row: u16,
     explorer: (u16, u16),
     source_control: (u16, u16),
+    search: (u16, u16),
 }
 
 impl Default for ActivityZones {
     fn default() -> Self {
         // row = MAX: nothing hit-tests true before the first draw.
-        Self { row: u16::MAX, explorer: (0, 0), source_control: (0, 0) }
+        Self { row: u16::MAX, explorer: (0, 0), source_control: (0, 0), search: (0, 0) }
     }
 }
 
@@ -559,6 +560,7 @@ impl App {
             KeyCode::Char('s') => self.open_settings(),
             KeyCode::Char('1') => return self.switch_to(View::Explorer),
             KeyCode::Char('2') => return self.switch_to(View::SourceControl),
+            KeyCode::Char('3') => return self.switch_to(View::Search),
             _ => {}
         }
         None
@@ -588,6 +590,9 @@ impl App {
                     }
                     if (zones.source_control.0..zones.source_control.1).contains(&mouse.column) {
                         return self.switch_to(View::SourceControl);
+                    }
+                    if (zones.search.0..zones.search.1).contains(&mouse.column) {
+                        return self.switch_to(View::Search);
                     }
                 }
                 if hits(self.redraw, mouse.column, mouse.row) {
@@ -1589,10 +1594,11 @@ impl App {
     /// lives in the activity bar instead), and the hover title-action buttons
     /// sit just left of it.
     fn draw_header(&mut self, frame: &mut Frame, area: Rect) {
-        let gear = (!self.merged()).then(|| {
-            Span::styled(format!("{} ", gear_icon(self.theme)), Style::default().dim())
-        });
-        let gear_w = gear.as_ref().map(Span::width).unwrap_or(0) as u16;
+        let gear = (!self.merged()).then(|| format!("{} ", gear_icon(self.theme)));
+        let gear_w = gear
+            .as_ref()
+            .map(|chip| Span::raw(chip.as_str()).width())
+            .unwrap_or(0) as u16;
         let redraw_w = if gear.is_some() { 3 } else { 0 };
         self.title_zones.clear();
         let (action_spans, actions_w) = if title_actions_visible(self.last_mouse) {
@@ -1634,7 +1640,13 @@ impl App {
         if let Some(gear) = gear {
             let gx = area.x + area.width.saturating_sub(gear_w);
             self.gear = Rect::new(gx, area.y, gear_w, 1);
-            spans.push(gear);
+            spans.push(Span::styled(
+                gear,
+                icon_button_style(
+                    self.mouse_pos.is_some_and(|(x, y)| hits(self.gear, x, y)),
+                    true,
+                ),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
@@ -1718,40 +1730,50 @@ impl App {
         let outer_top = area.y;
         let outer_bottom = area.y + 2;
         let area = Rect::new(area.x, area.y + 1, area.width, 1);
-        let (exp_icon, git_icon) = activity_icons(self.theme);
-        let active = |on: bool| {
-            if on {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().dim()
-            }
-        };
+        let (exp_icon, git_icon, search_icon) = activity_icons(self.theme);
         // Both FA glyphs (folder, code-fork) render two cells wide in the
         // non-Mono Nerd Font; reserve the second cell in each chip so the
         // highlights are equal-sized with centered icons.
         let slack = if self.theme == IconTheme::Material { " " } else { "" };
+        let exp_chip = format!(" {exp_icon}{slack} ");
+        let git_chip = format!(" {git_icon}{slack} ");
+        let search_chip = format!(" {search_icon}{slack} ");
+        let exp_start = area.x + 1;
+        let exp_end = exp_start + Span::raw(exp_chip.as_str()).width() as u16;
+        let git_start = exp_end + 1;
+        let git_end = git_start + Span::raw(git_chip.as_str()).width() as u16;
+        let search_start = git_end + 1;
+        let search_end = search_start + Span::raw(search_chip.as_str()).width() as u16;
+        let hovered = |(start, end): (u16, u16)| {
+            self.mouse_pos
+                .is_some_and(|(x, y)| y == area.y && (start..end).contains(&x))
+        };
         let spans = [
             Span::raw(" "),
-            Span::styled(format!(" {exp_icon}{slack} "), active(true)),
+            Span::styled(
+                exp_chip,
+                activity_button_style(true, hovered((exp_start, exp_end))),
+            ),
             Span::raw(" "),
-            Span::styled(format!(" {git_icon}{slack} "), active(false)),
+            Span::styled(
+                git_chip,
+                activity_button_style(false, hovered((git_start, git_end))),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                search_chip,
+                activity_button_style(false, hovered((search_start, search_end))),
+            ),
         ];
-        // Hit zones from the actual span widths (emoji vs nerd-glyph widths differ).
-        let mut x = area.x;
-        let mut bounds = Vec::new();
-        for span in &spans {
-            let w = span.width() as u16;
-            bounds.push((x, x + w));
-            x += w;
-        }
         self.activity = ActivityZones {
             row: area.y,
-            explorer: bounds[1],
-            source_control: bounds[3],
+            explorer: (exp_start, exp_end),
+            source_control: (git_start, git_end),
+            search: (search_start, search_end),
         };
         // Symmetric half-block caps: a 2-cell button with the icon in its
         // vertical center.
-        let (chip_start, chip_end) = bounds[1];
+        let (chip_start, chip_end) = self.activity.explorer;
         let chip_w = chip_end.saturating_sub(chip_start);
         let cap = |glyph: &str| {
             Paragraph::new(glyph.repeat(usize::from(chip_w)))
@@ -1759,10 +1781,17 @@ impl App {
         };
         frame.render_widget(cap("▄"), Rect::new(chip_start, outer_top, chip_w, 1));
         frame.render_widget(cap("▀"), Rect::new(chip_start, outer_bottom, chip_w, 1));
-        let gear = Span::styled(format!(" {} ", gear_icon(self.theme)), Style::default().dim());
-        let gear_w = gear.width() as u16;
+        let gear_chip = format!(" {} ", gear_icon(self.theme));
+        let gear_w = Span::raw(gear_chip.as_str()).width() as u16;
         let gear_x = area.x + area.width.saturating_sub(gear_w);
         self.gear = Rect::new(gear_x, area.y, gear_w, 1);
+        let gear = Span::styled(
+            gear_chip,
+            icon_button_style(
+                self.mouse_pos.is_some_and(|(x, y)| hits(self.gear, x, y)),
+                true,
+            ),
+        );
         let redraw_x = gear_x.saturating_sub(3);
         let (redraw, redraw_rect) =
             redraw_button(self.theme, redraw_x, area.y, self.mouse_pos);

@@ -366,6 +366,12 @@ HACKING.md — budget time for that before promising a patched build.
 - Both views ship in ONE binary: the activity bar switches them **in process** (instant,
   no flash — the terminal session is held across switches). The old two-crate host/guest
   process-swap protocol is gone.
+- Unified Sidebar now has a third in-process **Search** tab (`src/search_app.rs`) in
+  unified mode only. It shells out to `rg --json --line-buffered` from the current
+  Sidebar root, with VS Code-style include/exclude glob text fields (comma-separated,
+  relative to the root), regex/case/whole-word toggles, grouped streaming results, and
+  an error view with `Retry` when `rg` is missing. Search INPUTS sync across same-root
+  unified tabs via `workspace_sync::SearchState`; results stay tab-local.
 - Unix toggle/ensure launchers and the separated-pane path open the manifest entrypoint through
   `plugin.pane.open`, then apply the existing swap/resize/focus steps. Do not regress them to
   `pane.split` + `pane.send_input`: that exposes the interactive shell prompt and launch command
@@ -427,8 +433,18 @@ HACKING.md — budget time for that before promising a patched build.
   that SAME reduced width, otherwise long-list clicks land on the row body instead.
   File/folder rows reserve their `⋯` menu cell even while hidden, so hover never shifts
   the name or existing right-edge actions.
+- **Search-result highlight ranges are BYTE offsets, not display widths**: `rg --json`
+  submatches report UTF-8 byte spans into the line text. When the UI clips a long result
+  line and prefixes it with `…`, shift the saved match spans by the ellipsis' UTF-8 byte
+  length (`'…'.len_utf8()`), not by its single-cell display width, or the highlight lands
+  on the wrong bytes.
 - Gotcha: after the ✧ suggestion lands, panel focus moves to the message box — letter keys
   then type text instead of triggering actions (Esc returns to the list).
+- **Icon-button interaction is uniform across every view**: normal buttons have no background;
+  hover uses the shared `ui::icon_button_style` / `KEYCAP_BG` background rather than changing
+  the glyph color; active/toggled styling is separate from hover. Mouse motion only updates
+  hover state — actions run exclusively on `MouseEventKind::Down(MouseButton::Left)`. This
+  includes activity-bar views, Search/Clear, Retry, hard redraw, Settings, and title actions.
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
   hover buttons at the header's top-right (Explorer: New File / New Folder / Refresh /
   Collapse All; SCM: Refresh / Collapse All), left of the standalone ⚙. Terminals emit NO

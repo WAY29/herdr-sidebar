@@ -41,6 +41,10 @@ const MAX_LINES: usize = 5000;
 /// Enough room for the viewer to remain useful on a narrow terminal.
 const MIN_PREVIEW_WIDTH: u16 = 24;
 
+/// Shared search-hit highlight colors used by both Search results and Preview.
+pub const SEARCH_HIGHLIGHT_BG: Color = Color::Rgb(0x51, 0x58, 0x00);
+pub const SEARCH_HIGHLIGHT_FG: Color = Color::Rgb(0xff, 0xf6, 0xb0);
+
 /// Control-file header used by the in-process viewer. The width is the
 /// sidebar's pre-zoom width, which keeps the left column stable after zoom.
 const INLINE_CONTROL_PREFIX: &str = "inline\t";
@@ -84,6 +88,14 @@ pub fn control_path(sidebar_pane_id: &str) -> PathBuf {
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Request {
     File(PathBuf),
+    SearchFile {
+        path: PathBuf,
+        line: usize,
+        query: String,
+        regex: bool,
+        case_sensitive: bool,
+        whole_word: bool,
+    },
     Diff {
         root: PathBuf,
         rel: String,
@@ -109,6 +121,26 @@ enum Request {
 /// Control-file payload for a file preview.
 pub fn file_request(path: &Path) -> String {
     format!("file\t{}", path.display())
+}
+
+/// Control-file payload for a file preview anchored to one search hit.
+pub fn search_file_request(
+    path: &Path,
+    line: usize,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+) -> String {
+    let payload = serde_json::json!({
+        "path": path,
+        "line": line,
+        "query": query,
+        "regex": regex,
+        "case_sensitive": case_sensitive,
+        "whole_word": whole_word,
+    });
+    format!("searchfile\t{payload}")
 }
 
 /// Control-file payload for a git diff (`kind`: staged | worktree | untracked).
@@ -163,6 +195,26 @@ fn parse_request(raw: &str) -> Option<Request> {
             let rel = parts.next()?.to_string();
             let old_rel = parts.next().filter(|path| !path.is_empty()).map(str::to_string);
             Some(Request::RefDiff { root, old_spec, new_spec, rel, old_rel })
+        }
+        Some("searchfile") => {
+            #[derive(serde::Deserialize)]
+            struct Payload {
+                path: PathBuf,
+                line: usize,
+                query: String,
+                regex: bool,
+                case_sensitive: bool,
+                whole_word: bool,
+            }
+            let payload: Payload = serde_json::from_str(parts.next()?).ok()?;
+            Some(Request::SearchFile {
+                path: payload.path,
+                line: payload.line,
+                query: payload.query,
+                regex: payload.regex,
+                case_sensitive: payload.case_sensitive,
+                whole_word: payload.whole_word,
+            })
         }
         Some("file") => Some(Request::File(PathBuf::from(parts.next()?))),
         // Legacy: a bare path.
@@ -365,6 +417,9 @@ fn load(
 ) -> Doc {
     match request {
         Request::File(path) => load_file(path, diff_theme),
+        Request::SearchFile { path, line, query, regex, case_sensitive, whole_word } => {
+            load_search_file(path, *line, query, *regex, *case_sensitive, *whole_word, diff_theme)
+        }
         Request::Diff { root, rel, kind } => {
             load_diff(root, rel, kind, diff_theme, hide_unmodified, expanded_folds)
         }
@@ -463,6 +518,32 @@ fn glow_markdown(text: &str, width: u16) -> Option<Vec<Line<'static>>> {
 }
 
 fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
+    load_file_inner(target, diff_theme, None)
+}
+
+fn load_search_file(
+    target: &Path,
+    line: usize,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    diff_theme: DiffTheme,
+) -> Doc {
+    let mut doc = load_file_inner(
+        target,
+        diff_theme,
+        Some((query, regex, case_sensitive, whole_word)),
+    );
+    doc.scroll = line.saturating_sub(5).saturating_sub(1);
+    doc
+}
+
+fn load_file_inner(
+    target: &Path,
+    diff_theme: DiffTheme,
+    search: Option<(&str, bool, bool, bool)>,
+) -> Doc {
     let name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -478,13 +559,19 @@ fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
             } else {
                 let truncated = bytes.len() > MAX_BYTES;
                 let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES)]);
+                let search_re = search
+                    .and_then(|(query, regex, case_sensitive, whole_word)| {
+                        build_search_regex(query, regex, case_sensitive, whole_word).ok()
+                    });
                 // Markdown: render via glow; fall back to syntax highlight on failure.
                 // Width is approximated by subtracting 6 for the sidebar share and
                 // line-number gutter; ideal fix is to pass body.width from draw_doc.
                 let glow_width =
                     crossterm::terminal::size().map(|(w, _)| w.saturating_sub(6)).unwrap_or(74);
-                let glow_rendered =
-                    is_markdown.then(|| glow_markdown(&text, glow_width)).flatten();
+                let glow_rendered = search_re
+                    .is_none()
+                    .then(|| is_markdown.then(|| glow_markdown(&text, glow_width)).flatten())
+                    .flatten();
                 // Glow-rendered markdown gets no line numbers (it formats its own layout).
                 let numbered = glow_rendered.is_none();
                 let mut lines: Vec<Line<'static>> = if let Some(rendered) = glow_rendered {
@@ -498,6 +585,9 @@ fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
                                 .collect()
                         })
                 };
+                if let Some(search_re) = search_re.as_ref() {
+                    apply_search_highlights(&mut lines, &text, search_re);
+                }
                 if truncated || text.lines().count() > MAX_LINES {
                     lines.push(Line::raw("… (truncated)"));
                 }
@@ -509,6 +599,76 @@ fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
         }
     };
     Doc::new(name, target.display().to_string(), lines, numbered, Vec::new())
+}
+
+fn build_search_regex(
+    query: &str,
+    regex_mode: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+) -> Result<regex::Regex, regex::Error> {
+    let pattern = if regex_mode {
+        query.to_string()
+    } else {
+        regex::escape(query)
+    };
+    let pattern = if whole_word {
+        format!(r"\b(?:{pattern})\b")
+    } else {
+        pattern
+    };
+    let mut builder = regex::RegexBuilder::new(&pattern);
+    builder.case_insensitive(!case_sensitive);
+    builder.build()
+}
+
+fn apply_search_highlights(lines: &mut [Line<'static>], text: &str, regex: &regex::Regex) {
+    for (line, raw) in lines.iter_mut().zip(text.lines().take(MAX_LINES)) {
+        let matches: Vec<(usize, usize)> = regex.find_iter(raw).map(|m| (m.start(), m.end())).collect();
+        if matches.is_empty() {
+            continue;
+        }
+        *line = highlight_line(
+            line,
+            &matches,
+            Style::default().bg(SEARCH_HIGHLIGHT_BG).fg(SEARCH_HIGHLIGHT_FG),
+        );
+    }
+}
+
+fn highlight_line(
+    line: &Line<'static>,
+    matches: &[(usize, usize)],
+    highlight: Style,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let start = offset;
+        let end = start + content.len();
+        let mut cursor = start;
+        for (ms, me) in matches.iter().copied() {
+            let from = ms.max(start);
+            let to = me.min(end);
+            if from >= to {
+                continue;
+            }
+            if cursor < from {
+                spans.push(Span::styled(content[cursor - start..from - start].to_string(), span.style));
+            }
+            spans.push(Span::styled(
+                content[from - start..to - start].to_string(),
+                span.style.patch(highlight),
+            ));
+            cursor = to;
+        }
+        if cursor < end {
+            spans.push(Span::styled(content[cursor - start..].to_string(), span.style));
+        }
+        offset = end;
+    }
+    Line::from(spans).style(line.style)
 }
 
 fn load_diff(
@@ -1600,6 +1760,18 @@ mod tests {
     fn requests_roundtrip() {
         let f = file_request(Path::new("C:/x/y.rs"));
         assert_eq!(parse_request(&f), Some(Request::File(PathBuf::from("C:/x/y.rs"))));
+        let sf = search_file_request(Path::new("C:/x/y.rs"), 42, "main", false, false, true);
+        assert_eq!(
+            parse_request(&sf),
+            Some(Request::SearchFile {
+                path: PathBuf::from("C:/x/y.rs"),
+                line: 42,
+                query: "main".into(),
+                regex: false,
+                case_sensitive: false,
+                whole_word: true,
+            })
+        );
         let s = show_request(Path::new("C:/repo"), "stash@{1}", None);
         assert_eq!(
             parse_request(&s),

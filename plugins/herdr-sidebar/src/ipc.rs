@@ -56,34 +56,30 @@ pub fn call_text(method: &str, params: serde_json::Value) -> std::io::Result<Str
     roundtrip(&path, &request.to_string())
 }
 
-/// Stamp a sidebar pane's identity tokens with a fresh heartbeat timestamp
-/// (launchers treat stale stamps as dead panes — see
-/// `launch::HEARTBEAT_STALE_SECS`): always the pane's own view; in merged
-/// mode also the other view's (one Sidebar pane satisfies both plugins'
-/// launchers), otherwise the other view's token is cleared with an explicit
-/// null VALUE — `pane.report_metadata` MERGES the token map, so an empty
-/// map is a no-op (verified live, herdr 0.7.1).
+/// Stamp the pane's explorer/git identity tokens with a fresh heartbeat
+/// timestamp (launchers treat stale stamps as dead panes — see
+/// `launch::HEARTBEAT_STALE_SECS`). A merged Sidebar pane always satisfies
+/// both launchers, regardless of which in-process view is currently visible;
+/// a separated pane stamps only its own launcher token and clears the other.
 pub fn report_identity(pane_id: &str, my: crate::state::View, merged: bool) {
     let now = crate::state::unix_now().to_string();
-    let mine = serde_json::json!({ my.plugin_id(): now });
-    let _ = call_text(
-        "pane.report_metadata",
-        serde_json::json!({ "pane_id": pane_id, "source": my.plugin_id(), "tokens": mine }),
-    );
-    let other = my.other();
-    let other_tokens = if merged {
-        serde_json::json!({ other.plugin_id(): now })
-    } else {
-        serde_json::json!({ other.plugin_id(): serde_json::Value::Null })
-    };
-    let _ = call_text(
-        "pane.report_metadata",
-        serde_json::json!({
-            "pane_id": pane_id,
-            "source": other.plugin_id(),
-            "tokens": other_tokens,
-        }),
-    );
+    let live = [crate::state::View::Explorer, crate::state::View::SourceControl];
+    for view in live {
+        let stamp = merged || view == my;
+        let tokens = if stamp {
+            serde_json::json!({ view.plugin_id(): now })
+        } else {
+            serde_json::json!({ view.plugin_id(): serde_json::Value::Null })
+        };
+        let _ = call_text(
+            "pane.report_metadata",
+            serde_json::json!({
+                "pane_id": pane_id,
+                "source": view.plugin_id(),
+                "tokens": tokens,
+            }),
+        );
+    }
 }
 
 // Windows' named-pipe `File` handle has no `set_read_timeout` via std (no

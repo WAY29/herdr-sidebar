@@ -38,13 +38,18 @@ pub enum Exit {
 pub enum View {
     Explorer,
     SourceControl,
+    Search,
 }
 
 impl View {
+    /// The standalone-pane counterpart. Search is unified-only, so its
+    /// fallback is Explorer for the small number of older call sites that
+    /// still ask for a paired view.
     pub fn other(self) -> View {
         match self {
             View::Explorer => View::SourceControl,
             View::SourceControl => View::Explorer,
+            View::Search => View::Explorer,
         }
     }
 
@@ -53,6 +58,7 @@ impl View {
         match self {
             View::Explorer => "Explorer",
             View::SourceControl => "Source Control",
+            View::Search => "Search",
         }
     }
 
@@ -61,6 +67,7 @@ impl View {
         match self {
             View::Explorer => "herdr-sidebar-explorer",
             View::SourceControl => "herdr-sidebar-git",
+            View::Search => "herdr-sidebar-search",
         }
     }
 
@@ -69,6 +76,7 @@ impl View {
         match self {
             View::Explorer => "explorer",
             View::SourceControl => "git",
+            View::Search => "search",
         }
     }
 
@@ -76,6 +84,7 @@ impl View {
         match flag {
             "explorer" => Some(View::Explorer),
             "git" => Some(View::SourceControl),
+            "search" => Some(View::Search),
             _ => None,
         }
     }
@@ -85,6 +94,7 @@ impl View {
         match self {
             View::Explorer => "explorer",
             View::SourceControl => "source-control",
+            View::Search => "search",
         }
     }
 
@@ -92,6 +102,7 @@ impl View {
         match self {
             View::Explorer => "explorer",
             View::SourceControl => "source-control",
+            View::Search => "search",
         }
     }
 
@@ -99,6 +110,7 @@ impl View {
         match name {
             "explorer" => Some(View::Explorer),
             "source-control" => Some(View::SourceControl),
+            "search" => Some(View::Search),
             _ => None,
         }
     }
@@ -349,8 +361,10 @@ mod tests {
     fn views_pair_up() {
         assert_eq!(View::Explorer.other(), View::SourceControl);
         assert_eq!(View::SourceControl.other(), View::Explorer);
+        assert_eq!(View::Search.other(), View::Explorer);
         assert_eq!(View::Explorer.label(), "Explorer");
         assert_eq!(View::SourceControl.plugin_id(), "herdr-sidebar-git");
+        assert_eq!(View::Search.view_flag(), "search");
     }
 
 }

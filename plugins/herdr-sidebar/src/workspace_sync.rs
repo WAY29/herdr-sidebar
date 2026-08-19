@@ -95,6 +95,16 @@ pub struct ScmState {
     pub expanded_ref: Option<ExpandedScmRef>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchState {
+    pub query: String,
+    pub include: String,
+    pub exclude: String,
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceState {
     pub root: PathBuf,
@@ -102,6 +112,8 @@ pub struct WorkspaceState {
     pub width: u16,
     pub explorer: Option<ExplorerState>,
     pub scm: Option<ScmState>,
+    #[serde(default)]
+    pub search: Option<SearchState>,
     writer: String,
     revision: u64,
 }
@@ -114,6 +126,7 @@ impl WorkspaceState {
             width: 0,
             explorer: None,
             scm: None,
+            search: None,
             writer: String::new(),
             revision: 0,
         }
@@ -230,6 +243,10 @@ impl Session {
 
     pub fn publish_scm(&mut self, active: View, width: u16, scm: ScmState) {
         self.publish(active, width, |state| state.scm = Some(scm));
+    }
+
+    pub fn publish_search(&mut self, active: View, width: u16, search: SearchState) {
+        self.publish(active, width, |state| state.search = Some(search));
     }
 
     pub fn publish_active(&mut self, active: View, width: u16) {
@@ -451,6 +468,7 @@ mod tests {
                 }),
                 ..ScmState::default()
             }),
+            search: None,
             writer: "pane-1".into(),
             revision: 7,
         };
