@@ -9,13 +9,20 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::FontStyle;
+use syntect::highlighting::{Color as SyntectColor, FontStyle};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
 pub type DiffTheme = EmbeddedThemeName;
 pub const DEFAULT_DIFF_THEME: DiffTheme = EmbeddedThemeName::CatppuccinMocha;
+
+#[derive(Clone, Copy)]
+pub struct PreviewHighlightStyles {
+    pub selection: Style,
+    pub comment: Style,
+    pub comment_border: Color,
+}
 
 pub fn diff_themes() -> &'static [DiffTheme] {
     EmbeddedLazyThemeSet::theme_names()
@@ -30,6 +37,55 @@ pub fn diff_theme_from_name(name: &str) -> Option<DiffTheme> {
 
 pub fn diff_theme_index(theme: DiffTheme) -> usize {
     diff_themes().iter().position(|candidate| *candidate == theme).unwrap_or(0)
+}
+
+fn tui_color(color: SyntectColor) -> Color {
+    Color::Rgb(color.r, color.g, color.b)
+}
+
+fn overlay_style(background: Option<SyntectColor>, foreground: Option<SyntectColor>) -> Style {
+    let mut style = Style::default();
+    if let Some(background) = background {
+        style = style.bg(tui_color(background));
+    }
+    if let Some(foreground) = foreground {
+        style = style.fg(tui_color(foreground));
+    }
+    style
+}
+
+pub fn preview_highlight_styles(diff_theme: DiffTheme) -> PreviewHighlightStyles {
+    let (_, themes) = assets();
+    let settings = &themes.get(diff_theme).settings;
+    let selection_background = settings
+        .selection
+        .or(settings.find_highlight)
+        .or(settings.inactive_selection)
+        .or(settings.line_highlight)
+        .or(settings.background);
+    let comment_background = settings
+        .find_highlight
+        .or(settings.inactive_selection)
+        .or(settings.line_highlight)
+        .or(settings.selection)
+        .or(settings.background);
+    let comment_foreground = settings
+        .find_highlight_foreground
+        .or(settings.inactive_selection_foreground);
+    let comment_border = settings
+        .accent
+        .or(comment_foreground)
+        .or(settings.caret)
+        .or(settings.foreground)
+        .or(comment_background)
+        .map(tui_color)
+        .unwrap_or(Color::Reset);
+
+    PreviewHighlightStyles {
+        selection: overlay_style(selection_background, settings.selection_foreground),
+        comment: overlay_style(comment_background, comment_foreground),
+        comment_border,
+    }
 }
 
 /// Lines longer than this skip highlighting entirely. syntect's `regex-fancy`
@@ -240,5 +296,33 @@ name = \"x\"
             assert_eq!(diff_theme_from_name(theme.as_name()), Some(*theme));
             assert_eq!(themes[diff_theme_index(*theme)], *theme);
         }
+    }
+
+    #[test]
+    fn preview_highlights_use_the_selected_theme_colors() {
+        let (_, themes) = assets();
+        let settings = &themes.get(DEFAULT_DIFF_THEME).settings;
+        let highlights = preview_highlight_styles(DEFAULT_DIFF_THEME);
+
+        assert_eq!(
+            highlights.selection.bg,
+            settings
+                .selection
+                .or(settings.find_highlight)
+                .or(settings.inactive_selection)
+                .or(settings.line_highlight)
+                .or(settings.background)
+                .map(tui_color)
+        );
+        assert_eq!(
+            highlights.comment.bg,
+            settings
+                .find_highlight
+                .or(settings.inactive_selection)
+                .or(settings.line_highlight)
+                .or(settings.selection)
+                .or(settings.background)
+                .map(tui_color)
+        );
     }
 }

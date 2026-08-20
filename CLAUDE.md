@@ -336,10 +336,13 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   not pipeable output. Claude panes inside such a server stay pale until the server is
   restarted from a clean (non-agent) shell.
 
-- Without keyboard-enhancement protocols (not enabled in herdr panes), **modifier+Enter is
+- Without keyboard-enhancement protocols, **modifier+Enter is
   indistinguishable from plain Enter** in most Windows terminals — a "Ctrl+Enter" binding
   silently means "Enter". Design keymaps so unmodified keys suffice (the commit
-  box accepts plain Enter for this reason).
+  box accepts plain Enter for this reason). The Sidebar TUI explicitly requests Kitty's
+  `DISAMBIGUATE_ESCAPE_CODES` mode after the first-run font prompt and pops it on exit: legacy
+  pane encoding drops macOS Command/Super, turning Cmd+C into plain `c` and opening Comment
+  instead of copying the Preview selection. Keep this terminal mode around any Super shortcut.
 - **AltGr arrives from Windows as CONTROL|ALT on the Char event** in crossterm (no AltGr
   normalization): a guard like `modifiers.contains(CONTROL) => shortcut, return` silently
   swallows `@ { [ ] } \` on German/French/Nordic layouts. Treat CONTROL+ALT chars as text
@@ -627,6 +630,27 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   parser) still renders `git show` output
   (ansi-to-tui pins an older ratatui — don't add it).
   Staged rows show `--cached`; untracked files render via `diff --no-index NUL <file>`.
+- Preview remains read-only, but ordinary source files and structured SCM diffs support
+  application-owned CHARACTER selection by left-button drag. The hit map carries source
+  grapheme/byte boundaries through 4-column tab expansion, double-width glyphs, diff gutters,
+  and hard wrapping; copied text therefore contains the original tabs/newlines and no visual
+  gutter or wrap artifacts. Dragging into the header/footer auto-scrolls, a click alone selects
+  nothing, and folded diff gaps stop a selection until expanded. `Cmd+C` on macOS (`Ctrl+C`
+  elsewhere) copies the current raw selection. `c` opens a multiline comment editor; saving clears
+  the active selection, leaves an in-memory comment-colored range in Preview, and returns to the
+  default `drag to select text` footer with `y Copy`, `s Send Agent`, and per-current-file
+  `d Clear N` appended while comments exist. Active-selection, saved-comment, and tooltip-accent
+  colors come from the selected Diff Theme rather than fixed RGB values. Hovering the saved range
+  shows its Comment body in an anchored tooltip; this reuses the same source-byte/cell map, so it
+  must not be implemented as row insertion or independent column arithmetic. Saved comments may
+  span files, `y` copies all comments, and `s`
+  sends all comments to the sole agent pane in the SAME TAB or opens
+  the existing option picker when several exist. Agents in other tabs are never offered. Export is
+  consume-on-success; failures retain every comment. Agent delivery uses bracketed
+  `pane.send_text`, then closes Preview and focuses the
+  recipient. Locations include character columns (`path:line:column-line:column`), and removed-only
+  diff selections are marked `(removed)`. Glow-formatted Markdown and legacy ANSI `git show`
+  remain non-selectable because they have no reliable source-coordinate map.
 
 ### Syntax highlighting (file preview)
 

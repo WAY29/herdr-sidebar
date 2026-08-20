@@ -46,6 +46,23 @@ pub struct RenderedDiff {
     pub lines: Vec<Line<'static>>,
     pub folds: Vec<Option<FoldId>>,
     pub first_change: Option<usize>,
+    pub sources: Vec<Option<DiffSource>>,
+}
+
+/// Source text and line identity behind one selectable rendered diff row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffSource {
+    pub text: String,
+    pub old_line: Option<usize>,
+    pub new_line: Option<usize>,
+    pub kind: DiffSourceKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffSourceKind {
+    Context,
+    Deleted,
+    Added,
 }
 
 #[derive(Clone, Copy)]
@@ -320,6 +337,7 @@ pub fn render_expanded(
 
     let mut lines = Vec::new();
     let mut folds = Vec::new();
+    let mut sources = Vec::new();
     let mut first_change = None;
     let mut pending_folds = fold_ranges.iter().peekable();
     let mut idx = 0;
@@ -349,29 +367,39 @@ pub fn render_expanded(
                     .style(Style::default().bg(FOLD_BG)),
                 );
                 folds.push(Some(fold.id));
+                sources.push(None);
                 idx = fold.end;
                 continue;
             }
         }
 
         match &evs[idx] {
-            Ev::Omitted(hidden) => lines.push(
-                Line::from(Span::styled(
-                    format!("{}⋯  {hidden} unmodified lines", " ".repeat(w + 2)),
-                    Style::default().fg(FOLD_FG),
-                ))
-                .style(Style::default().bg(FOLD_BG)),
-            ),
-            Ev::Plain(t) => lines.push(Line::from(Span::styled(
-                t.clone(),
-                Style::default().dim(),
-            ))),
-            Ev::Ctx(_o, n, t) => {
+            Ev::Omitted(hidden) => {
+                lines.push(
+                    Line::from(Span::styled(
+                        format!("{}⋯  {hidden} unmodified lines", " ".repeat(w + 2)),
+                        Style::default().fg(FOLD_FG),
+                    ))
+                    .style(Style::default().bg(FOLD_BG)),
+                );
+                sources.push(None);
+            }
+            Ev::Plain(t) => {
+                lines.push(Line::from(Span::styled(t.clone(), Style::default().dim())));
+                sources.push(None);
+            }
+            Ev::Ctx(o, n, t) => {
                 old_hl.line(t);
                 let spans = expand_tabs(new_hl.line(t));
                 let mut all = gutter(Some(*n), None);
                 all.extend(spans);
                 lines.push(Line::from(all));
+                sources.push(Some(DiffSource {
+                    text: t.clone(),
+                    old_line: Some(*o),
+                    new_line: Some(*n),
+                    kind: DiffSourceKind::Context,
+                }));
             }
             Ev::Del(o, t) => {
                 first_change.get_or_insert(lines.len());
@@ -383,6 +411,12 @@ pub fn render_expanded(
                 let mut all = gutter(Some(*o), Some(DEL_MARK));
                 all.extend(spans);
                 lines.push(Line::from(all).style(Style::default().bg(DEL_BG)));
+                sources.push(Some(DiffSource {
+                    text: t.clone(),
+                    old_line: Some(*o),
+                    new_line: None,
+                    kind: DiffSourceKind::Deleted,
+                }));
             }
             Ev::Add(n, t) => {
                 first_change.get_or_insert(lines.len());
@@ -394,12 +428,23 @@ pub fn render_expanded(
                 let mut all = gutter(Some(*n), Some(ADD_MARK));
                 all.extend(spans);
                 lines.push(Line::from(all).style(Style::default().bg(ADD_BG)));
+                sources.push(Some(DiffSource {
+                    text: t.clone(),
+                    old_line: None,
+                    new_line: Some(*n),
+                    kind: DiffSourceKind::Added,
+                }));
             }
         }
         folds.push(None);
         idx += 1;
     }
-    RenderedDiff { lines, folds, first_change }
+    RenderedDiff {
+        lines,
+        folds,
+        first_change,
+        sources,
+    }
 }
 
 #[cfg(test)]

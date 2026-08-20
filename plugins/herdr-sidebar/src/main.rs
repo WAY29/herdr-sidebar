@@ -17,8 +17,10 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
-    MouseEventKind,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
+use crossterm::terminal::supports_keyboard_enhancement;
 use herdr_sidebar::{launch, state, viewer};
 use herdr_sidebar::workspace_sync::Session as SyncSession;
 use state::{Exit, View};
@@ -128,6 +130,15 @@ fn main() -> std::io::Result<()> {
     // itself (the app loops haven't started yet, and a token-less pane gets
     // REPLACE-killed by the corpse rule while the user reads the prompt).
     herdr_sidebar::fontsetup::maybe_prompt(&mut terminal, view, persisted.merged)?;
+    // Legacy terminal input cannot represent Command/Super. Request Kitty's
+    // disambiguated keys so macOS Cmd+C reaches Preview instead of plain `c`.
+    let enhanced_keys = supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced_keys {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     let mut quick_open = quick_open::Inbox::for_current_pane();
     let result = loop {
         let exit = match view {
@@ -147,6 +158,9 @@ fn main() -> std::io::Result<()> {
             Err(e) => break Err(e),
         }
     };
+    if enhanced_keys {
+        let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = crossterm::execute!(std::io::stdout(), DisableFocusChange, DisableMouseCapture);
     ratatui::restore();
     result
@@ -276,11 +290,16 @@ fn run_explorer(
                     preview.on_mouse(mouse);
                     None
                 }
+                Event::Paste(text) if preview.is_open() => {
+                    preview.on_paste(&text);
+                    None
+                }
                 Event::Key(key) => {
                     preview.claim_focus();
                     app.on_key(key)
                 }
                 Event::Mouse(mouse) => {
+                    preview.clear_mouse_hover();
                     preview.observe_mouse();
                     let exit = app.on_mouse(mouse);
                     preview.sync();
@@ -442,11 +461,16 @@ fn run_scm(
                     preview.on_mouse(mouse);
                     None
                 }
+                Event::Paste(text) if preview.is_open() => {
+                    preview.on_paste(&text);
+                    None
+                }
                 Event::Key(key) => {
                     preview.claim_focus();
                     app.on_key(key)
                 }
                 Event::Mouse(mouse) => {
+                    preview.clear_mouse_hover();
                     preview.observe_mouse();
                     let exit = app.on_mouse(mouse);
                     preview.sync();
@@ -611,11 +635,16 @@ fn run_search(
                     preview.on_mouse(mouse);
                     None
                 }
+                Event::Paste(text) if preview.is_open() => {
+                    preview.on_paste(&text);
+                    None
+                }
                 Event::Key(key) => {
                     preview.claim_focus();
                     app.on_key(key)
                 }
                 Event::Mouse(mouse) => {
+                    preview.clear_mouse_hover();
                     preview.observe_mouse();
                     let exit = app.on_mouse(mouse);
                     preview.sync();

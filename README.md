@@ -57,6 +57,11 @@ A real tree, not a directory dump:
 - **Click a file and it opens** across every column beside the sidebar. Existing panes
   stay untouched behind the preview; Esc reveals them exactly as they were. Line numbers,
   scrolling, and binary files are handled, and clicking another file updates in place.
+- **Drag to select exact source characters** in ordinary files and structured diffs. Copy the
+  raw selection, or attach comments and send the accumulated review to an agent without editing
+  the file. Saved ranges stay highlighted in Preview and reveal their temporary Comment in a
+  tooltip on hover. Tabs, Unicode width, diff gutters, and wrapped rows stay mapped to the source
+  text.
 - **Double-click folders** to fold, hover highlights, mouse wheel, and a hover **⋯ menu button**:
   New File, New Folder, Open with Default App (files
   only — hands the file to the OS-associated app, like a double click in the file
@@ -223,6 +228,25 @@ Settings and `b` hides the Sidebar when focus is not inside a Search text field.
 | `S` | sync upstream changes |
 | `r` | refresh |
 | `q` | quit |
+
+| Preview | What it does |
+|---|---|
+| Left drag | select characters in source files and structured diffs |
+| `Cmd+C` (macOS), `Ctrl+C` (elsewhere) | copy the raw selection |
+| `c` | comment on the selection; hover the saved highlight to read it |
+| `y` | copy all saved comments |
+| `s` | send all saved comments to an Agent in the same tab |
+| `d` | clear all saved comments for the current file |
+| `Esc` | clear selection, cancel a dialog, or close Preview |
+| `q` | close Preview |
+
+Comment sending only targets Agent panes in the same tab as Preview. One target sends directly;
+multiple targets open a chooser. Saved comments and their highlights are temporary Preview state;
+an active selection temporarily shows `c Comment` and the platform copy shortcut. Saving returns to
+the outer `drag to select text` footer, which appends `y Copy`, `s Send Agent`, and `d Clear N` once
+comments exist. Comments are removed after a successful copy/send, or per file with `d`, and are
+never written to the source file.
+Selection, saved-comment, and tooltip accent colors follow the active Diff Theme.
 
 | Search | What it does |
 |---|---|
