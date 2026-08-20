@@ -357,14 +357,15 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   every ~5s; launch decisions treat a stamp older than `HEARTBEAT_STALE_SECS` (20s) — or a
   "Sidebar" label with no token at all — as a corpse and return `REPLACE <id>`: close the
   pane, dock a fresh one. Ensure hook and all launcher scripts handle it.
-- **Server-restart resume creates corpses that NO event heals by itself**: herdr
-  restores panes with their labels and scrollback, but the process inside is a fresh
-  shell and metadata tokens are gone; restore and client attach emit NO hookable events
-  at all (verified live — tab.created/workspace.created/pane.focused all silent).
-  The fix is two-part: (1) label-without-token now counts as a corpse for ALL our
-  labels (Sidebar/Explorer/Source Control/Preview), and (2) the ensure hook also runs
-  on `pane.focused` + `tab.created` + `workspace.created`, so the user's FIRST
-  interaction after attach heals the tab. Hooking pane.* from a pane-creating script
+- **Server-restart resume creates corpses that focus/create events do not heal by themselves**:
+  herdr restores panes with their labels and scrollback, but the process inside is a fresh
+  shell and metadata tokens are gone; restore and client attach emit no focus/create hooks.
+  The manifest therefore runs the same ensure path through `[[startup]]` after the restored
+  session is loaded. Label-without-token counts as a corpse for all our labels
+  (Sidebar/Explorer/Source Control/Preview), and the launcher closes it, refreshes `pane list`
+  (the old focused-pane snapshot is invalid after close), then docks a fresh Sidebar.
+  `pane.focused` + `tab.created` + `workspace.created` remain fallback hooks. Hooking
+  pane.* from a pane-creating script
   is only safe because `open()` now HOLDS ITS LOCK until the spawned TUI stamps its
   token — without that wait, queued hook invocations see the fresh label-only pane and
   replace it before it boots: an infinite replace loop (observed live, dozens of panes

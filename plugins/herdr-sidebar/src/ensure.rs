@@ -100,6 +100,9 @@ fn run_mode(mode: Mode) -> std::io::Result<()> {
             // A dead pane (stale heartbeat): close it and dock a fresh one in
             // every mode — a corpse should never block the dock.
             ipc::call_text("pane.close", serde_json::json!({ "pane_id": id }))?;
+            // Closing the focused pane invalidates the old pane-list snapshot;
+            // derive the split target from the newly-focused live pane.
+            let panes = ipc::call_text("pane.list", serde_json::json!({}))?;
             open(&panes, mode != Mode::Quiet)?;
         }
         _ => {

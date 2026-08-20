@@ -36,6 +36,15 @@ panes="$("$herdr_bin" pane list 2>/dev/null || true)"
 [ -n "$panes" ] || exit 0
 
 decision="$(printf '%s' "$panes" | "$bin" --launch-decision 2>/dev/null || true)"
+if [[ "$decision" == "REPLACE "* ]]; then
+  # Closing the focused corpse invalidates this pane-list snapshot. Refresh it
+  # before deriving the split target; otherwise open-plan uses a dead pane id.
+  corpse="${decision#REPLACE }"
+  "$herdr_bin" pane close "$corpse" >/dev/null 2>&1 || true
+  panes="$("$herdr_bin" pane list 2>/dev/null || true)"
+  [ -n "$panes" ] || exit 0
+  decision="$(printf '%s' "$panes" | "$bin" --launch-decision 2>/dev/null || true)"
+fi
 [ "$decision" = "OPEN" ] || exit 0
 
 # Respect a tab the user toggled closed (open-explorer.sh writes the marker) —
