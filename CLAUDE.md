@@ -651,9 +651,14 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   and terminal resizes do not detach a continuation from its original fold. With unchanged-line
   hiding enabled, Git receives `--unified=5000`, matching the Viewer's own line ceiling;
   `diffview` then retains those Context events behind clickable
-  `⋯ N unmodified lines` rows. Clicking expands only that anchored old/new line range, and the
-  expanded set survives theme changes plus the ~2s live refresh. Gaps beyond the 5000-line
-  context budget remain summarized. Both Settings modals expose **Hide unmodified lines**
+  `⋯ N unmodified lines` rows. Clicking expands only that anchored old/new line range and
+  preserves the current visual source-row/soft-wrap anchor at the same screen offset, so newly
+  revealed leading context becomes reachable by scrolling up instead of jumping the viewport.
+  Hidden Context rows still advance both stateful syntax parsers for correct highlighting after
+  the fold, but allocate no spans; when the old/new syntax states match, advance the retained
+  context once and clone the resulting state. The expanded set survives theme changes plus the
+  ~2s live refresh. Gaps beyond the 5000-line context budget remain summarized. Both Settings
+  modals expose **Hide unmodified lines**
   (persisted as `hide_unmodified`, default on). Turning it off skips fold generation and
   immediately reloads the open Preview with every retained Context row visible; its context
   request uses 2500 lines on either side so the first change stays inside the 5000-line ceiling.

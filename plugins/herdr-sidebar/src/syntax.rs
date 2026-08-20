@@ -9,8 +9,12 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SyntectColor, FontStyle};
-use syntect::parsing::{SyntaxDefinition, SyntaxReference, SyntaxSet, SyntaxSetBuilder};
+use syntect::highlighting::{
+    Color as SyntectColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
+};
+use syntect::parsing::{
+    ParseState, ScopeStack, SyntaxDefinition, SyntaxReference, SyntaxSet, SyntaxSetBuilder,
+};
 use syntect::util::LinesWithEndings;
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
@@ -216,7 +220,17 @@ pub fn highlight(
 /// Stateful per-line highlighter (for diff rendering, where old/new file
 /// contexts advance independently). Plain spans when no grammar matches.
 pub struct LineHighlighter {
-    inner: Option<(HighlightLines<'static>, &'static SyntaxSet)>,
+    inner: Option<LineHighlighterState>,
+}
+
+struct LineHighlighterState {
+    parse: ParseState,
+    highlight: HighlightState,
+    highlighter: Highlighter<'static>,
+    syntax: &'static SyntaxReference,
+    syntaxes: &'static SyntaxSet,
+    theme: DiffTheme,
+    scratch: String,
 }
 
 impl LineHighlighter {
@@ -224,23 +238,39 @@ impl LineHighlighter {
         let assets = assets();
         let theme = assets.themes.get(diff_theme);
         Self {
-            inner: syntax_for_name(assets, name, None)
-                .map(|(syntaxes, syntax)| (HighlightLines::new(syntax, theme), syntaxes)),
+            inner: syntax_for_name(assets, name, None).map(|(syntaxes, syntax)| {
+                let highlighter = Highlighter::new(theme);
+                LineHighlighterState {
+                    parse: ParseState::new(syntax),
+                    highlight: HighlightState::new(&highlighter, ScopeStack::new()),
+                    highlighter,
+                    syntax,
+                    syntaxes,
+                    theme: diff_theme,
+                    scratch: String::new(),
+                }
+            }),
         }
     }
 
     /// Highlight one line (no trailing newline in, none out).
     pub fn line(&mut self, text: &str) -> Vec<Span<'static>> {
-        let Some((hl, syntaxes)) = self.inner.as_mut() else {
+        let Some(state) = self.inner.as_mut() else {
             return vec![Span::raw(text.to_string())];
         };
         if text.len() > MAX_HIGHLIGHT_LINE_LEN {
             return vec![Span::raw(text.to_string())];
         }
-        let with_nl = format!("{text}\n");
-        match hl.highlight_line(&with_nl, syntaxes) {
-            Ok(regions) => regions
-                .into_iter()
+        state.scratch.clear();
+        state.scratch.push_str(text);
+        state.scratch.push('\n');
+        match state.parse.parse_line(&state.scratch, state.syntaxes) {
+            Ok(ops) => HighlightIterator::new(
+                &mut state.highlight,
+                &ops,
+                &state.scratch,
+                &state.highlighter,
+            )
                 .filter_map(|(style, chunk)| {
                     let chunk = chunk.trim_end_matches(['\n', '\r']);
                     if chunk.is_empty() {
@@ -259,6 +289,60 @@ impl LineHighlighter {
                 .collect(),
             Err(_) => vec![Span::raw(text.to_string())],
         }
+    }
+
+    /// Advance two old/new syntax states across hidden identical context
+    /// without allocating spans that will never be rendered.
+    pub fn advance_context<'a>(
+        &mut self,
+        other: &mut Self,
+        lines: impl IntoIterator<Item = &'a str>,
+    ) {
+        let same_state = match (&self.inner, &other.inner) {
+            (Some(left), Some(right)) => {
+                std::ptr::eq(left.syntaxes, right.syntaxes)
+                    && std::ptr::eq(left.syntax, right.syntax)
+                    && left.theme == right.theme
+                    && left.parse == right.parse
+                    && left.highlight == right.highlight
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if same_state {
+            for line in lines {
+                self.advance(line);
+            }
+            if let (Some(source), Some(target)) = (&self.inner, &mut other.inner) {
+                target.parse.clone_from(&source.parse);
+                target.highlight.clone_from(&source.highlight);
+            }
+        } else {
+            for line in lines {
+                self.advance(line);
+                other.advance(line);
+            }
+        }
+    }
+
+    fn advance(&mut self, text: &str) {
+        let Some(state) = self.inner.as_mut() else { return };
+        if text.len() > MAX_HIGHLIGHT_LINE_LEN {
+            return;
+        }
+        state.scratch.clear();
+        state.scratch.push_str(text);
+        state.scratch.push('\n');
+        let Ok(ops) = state.parse.parse_line(&state.scratch, state.syntaxes) else {
+            return;
+        };
+        HighlightIterator::new(
+            &mut state.highlight,
+            &ops,
+            &state.scratch,
+            &state.highlighter,
+        )
+        .for_each(drop);
     }
 }
 
@@ -354,6 +438,52 @@ service user-api {\n\
         );
         assert!(route.iter().any(|span| span.content == "post"));
         assert!(route.iter().any(|span| span.content == "/login"));
+    }
+
+    #[test]
+    fn hidden_context_advance_preserves_visible_syntax_state() {
+        fn signature(spans: Vec<Span<'static>>) -> Vec<(String, Style)> {
+            spans
+                .into_iter()
+                .map(|span| (span.content.into_owned(), span.style))
+                .collect()
+        }
+
+        let hidden = ["/* hidden", "still hidden", "*/"];
+        let mut old = LineHighlighter::new("x.rs", DEFAULT_DIFF_THEME);
+        let mut new = LineHighlighter::new("x.rs", DEFAULT_DIFF_THEME);
+        old.advance_context(&mut new, hidden);
+
+        let mut expected = LineHighlighter::new("x.rs", DEFAULT_DIFF_THEME);
+        for line in hidden {
+            expected.line(line);
+        }
+        let expected = signature(expected.line("fn visible() {}"));
+        assert_eq!(signature(old.line("fn visible() {}")), expected);
+        assert_eq!(signature(new.line("fn visible() {}")), expected);
+
+        let mut old = LineHighlighter::new("x.rs", DEFAULT_DIFF_THEME);
+        let mut new = LineHighlighter::new("x.rs", DEFAULT_DIFF_THEME);
+        let mut expected_old = LineHighlighter::new("x.rs", DEFAULT_DIFF_THEME);
+        let mut expected_new = LineHighlighter::new("x.rs", DEFAULT_DIFF_THEME);
+        old.line("/*");
+        expected_old.line("/*");
+        new.line("fn changed() {}");
+        expected_new.line("fn changed() {}");
+        let hidden = ["context", "*/"];
+        old.advance_context(&mut new, hidden);
+        for line in hidden {
+            expected_old.line(line);
+            expected_new.line(line);
+        }
+        assert_eq!(
+            signature(old.line("let old_side = true;")),
+            signature(expected_old.line("let old_side = true;"))
+        );
+        assert_eq!(
+            signature(new.line("let new_side = true;")),
+            signature(expected_new.line("let new_side = true;"))
+        );
     }
 
     #[test]

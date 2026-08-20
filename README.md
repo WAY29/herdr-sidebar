@@ -127,8 +127,10 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
 - **Clear commit controls** — Commit and optional Sync Changes use compact one-row color blocks;
   the message box, buttons, and Changes section sit together without extra layout or blank
   padding rows.
-- Structured diffs hide long unchanged sections by default; toggle **Hide unmodified lines**
-  in ⚙ Settings to show all retained context immediately and center the first change.
+- Structured diffs hide long unchanged sections by default. Clicking an unmodified-lines fold
+  reveals that context without moving the current viewport, and hidden rows skip unnecessary
+  rendered-span allocation. Toggle **Hide unmodified lines** in ⚙ Settings to show all retained
+  context immediately and center the first change.
 - **✧ AI commit messages** — the sparkle button sends the pending diff to your local
   `claude` CLI and drops a drafted subject line into the message box. No claude? A clean
   filename-based fallback kicks in. Never blocks the UI.

@@ -581,6 +581,14 @@ struct Doc {
     highlighted_source_row: Option<(usize, Instant)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ViewAnchor {
+    raw: String,
+    kind: SourceKind,
+    unit_start: usize,
+    screen_row: usize,
+}
+
 impl Doc {
     fn new(
         name: String,
@@ -639,6 +647,53 @@ impl Doc {
         } else {
             self.visual_rows.get(visual_row).copied()
         }
+    }
+
+    fn view_anchor(&mut self, width: u16, height: u16) -> Option<ViewAnchor> {
+        self.ensure_visual_lines(width);
+        let end = self
+            .scroll
+            .saturating_add(usize::from(height))
+            .min(self.visual_len());
+        for visual_row in self.scroll..end {
+            let Some(fragment) = self.fragment_at(visual_row) else {
+                continue;
+            };
+            let Some(source) = self.sources.get(fragment.source_row).and_then(Option::as_ref)
+            else {
+                continue;
+            };
+            return Some(ViewAnchor {
+                raw: source.raw.clone(),
+                kind: source.kind,
+                unit_start: fragment.unit_start,
+                screen_row: visual_row - self.scroll,
+            });
+        }
+        None
+    }
+
+    fn restore_view_anchor(&mut self, anchor: &ViewAnchor, width: u16) -> bool {
+        self.ensure_visual_lines(width);
+        let Some(source_row) = self.sources.iter().position(|source| {
+            source
+                .as_ref()
+                .is_some_and(|source| source.kind == anchor.kind && source.raw == anchor.raw)
+        }) else {
+            return false;
+        };
+        let visual_row = if self.visual_width == 0 {
+            source_row
+        } else {
+            let Some(visual_row) = self.visual_fragments.iter().position(|fragment| {
+                fragment.source_row == source_row && fragment.unit_start == anchor.unit_start
+            }) else {
+                return false;
+            };
+            visual_row
+        };
+        self.scroll = visual_row.saturating_sub(anchor.screen_row);
+        true
     }
 
     fn number_width(&self) -> usize {
@@ -2805,7 +2860,7 @@ impl InlinePreview {
                 .flatten()
         {
             if self.expanded_folds.insert(fold) {
-                self.reload_current(false);
+                self.reload_current_preserving_view();
             }
             return;
         }
@@ -2943,6 +2998,29 @@ impl InlinePreview {
         self.last_refresh = Instant::now();
     }
 
+    fn reload_current_preserving_view(&mut self) {
+        let Some(request) = self.current.as_ref() else { return };
+        let keep = self.doc.as_ref().map(|doc| doc.scroll).unwrap_or(0);
+        let anchor = self
+            .doc
+            .as_mut()
+            .and_then(|doc| doc.view_anchor(self.body.width, self.body.height));
+        let mut doc = load(
+            request,
+            self.diff_theme,
+            self.hide_unmodified,
+            &self.expanded_folds,
+        );
+        if !anchor
+            .as_ref()
+            .is_some_and(|anchor| doc.restore_view_anchor(anchor, self.body.width))
+        {
+            doc.scroll = keep;
+        }
+        self.doc = Some(doc);
+        self.last_refresh = Instant::now();
+    }
+
     pub fn close(&mut self) {
         if !self.is_open() {
             return;
@@ -3074,13 +3152,20 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                             && let Some(request) = &current
                         {
                             let keep = doc.scroll;
-                            doc = load(
+                            let anchor = doc.view_anchor(body.width, body.height);
+                            let mut next = load(
                                 request,
                                 diff_theme,
                                 hide_unmodified,
                                 &expanded_folds,
                             );
-                            doc.scroll = keep;
+                            if !anchor
+                                .as_ref()
+                                .is_some_and(|anchor| next.restore_view_anchor(anchor, body.width))
+                            {
+                                next.scroll = keep;
+                            }
+                            doc = next;
                         }
                     }
                     _ => {}
@@ -4002,6 +4087,64 @@ mod tests {
         });
         assert_eq!(doc.selected_text().as_deref(), Some("alpha"));
         assert_eq!(doc.selected_range().unwrap().1.row, 0);
+    }
+
+    #[test]
+    fn expanding_a_fold_preserves_the_visible_diff_anchor() {
+        use std::fmt::Write as _;
+
+        fn doc(rendered: crate::diffview::RenderedDiff) -> Doc {
+            Doc::new(
+                "x.rs".into(),
+                String::new(),
+                rendered.lines,
+                false,
+                rendered.folds,
+            )
+            .with_sources(
+                rendered
+                    .sources
+                    .into_iter()
+                    .map(|source| source.map(SelectableRow::diff))
+                    .collect(),
+            )
+        }
+
+        let mut diff = String::from("@@ -1,20 +1,20 @@\n");
+        for line in 1..=20 {
+            if line == 10 {
+                diff.push_str("-let old = 10;\n+let new = 10;\n");
+            } else {
+                writeln!(diff, " let line_{line} = {line};").unwrap();
+            }
+        }
+        let collapsed = crate::diffview::render_expanded(
+            "x.rs",
+            &diff,
+            crate::syntax::DEFAULT_DIFF_THEME,
+            &HashSet::new(),
+            true,
+        );
+        let fold = collapsed.folds.iter().flatten().copied().next().unwrap();
+        let mut before = doc(collapsed);
+        let anchor = before.view_anchor(80, 20).unwrap();
+        assert_eq!(anchor.screen_row, 1, "the leading fold occupies row zero");
+
+        let expanded = crate::diffview::render_expanded(
+            "x.rs",
+            &diff,
+            crate::syntax::DEFAULT_DIFF_THEME,
+            &HashSet::from([fold]),
+            true,
+        );
+        let mut after = doc(expanded);
+        assert!(after.restore_view_anchor(&anchor, 80));
+        assert!(after.scroll > before.scroll, "new context must become reachable above");
+
+        let restored_row = after.source_row_at(after.scroll + anchor.screen_row).unwrap();
+        let restored = after.sources[restored_row].as_ref().unwrap();
+        assert_eq!(restored.kind, anchor.kind);
+        assert_eq!(restored.raw, anchor.raw);
     }
 
     #[test]

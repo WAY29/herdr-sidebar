@@ -348,13 +348,15 @@ pub fn render_expanded(
             pending_folds.next();
             if !expanded.contains(&fold.id) {
                 // Hidden context still advances both syntax states, so code after
-                // the marker highlights exactly as if every line were visible.
-                for ev in &evs[fold.start..fold.end] {
-                    if let Ev::Ctx(_, _, text) = ev {
-                        old_hl.line(text);
-                        new_hl.line(text);
-                    }
-                }
+                // the marker highlights exactly as if every line were visible,
+                // but no styled spans are allocated for rows that stay folded.
+                old_hl.advance_context(
+                    &mut new_hl,
+                    evs[fold.start..fold.end].iter().filter_map(|ev| match ev {
+                        Ev::Ctx(_, _, text) => Some(text.as_str()),
+                        _ => None,
+                    }),
+                );
                 lines.push(
                     Line::from(Span::styled(
                         format!(
