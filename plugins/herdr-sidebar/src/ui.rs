@@ -229,17 +229,29 @@ pub enum TitleAction {
     NewFolder,
     Refresh,
     CollapseAll,
+    ExpandAll,
+    Sync,
+    Commit,
 }
 
-/// How long the title-bar action buttons stay visible after the last mouse
-/// event. Terminals emit no "mouse left the pane" event, so hover can only be
-/// approximated: any mouse activity over the pane shows the buttons, and they
-/// fade after this linger (any further motion re-shows them instantly).
+/// How long hover UI stays visible after the last mouse event. Terminals emit
+/// no "mouse left the pane" event, so a pointer last seen on a hover target
+/// fades after this linger.
 pub const TITLE_ACTIONS_LINGER: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// The hover approximation described on [`TITLE_ACTIONS_LINGER`].
-pub fn title_actions_visible(last_mouse: Option<std::time::Instant>) -> bool {
+pub fn mouse_linger_active(last_mouse: Option<std::time::Instant>) -> bool {
     last_mouse.is_some_and(|at| at.elapsed() < TITLE_ACTIONS_LINGER)
+}
+
+/// Title actions appear only while the pointer is on that title row. The
+/// linger covers leaving the pane, where terminals provide no final motion.
+pub fn title_actions_visible(
+    last_mouse: Option<std::time::Instant>,
+    mouse_pos: Option<(u16, u16)>,
+    title: Rect,
+) -> bool {
+    mouse_linger_active(last_mouse)
+        && mouse_pos.is_some_and(|(x, y)| hits(title, x, y))
 }
 
 /// Theme-matched glyph for a title-bar action: VS Code's own codicons in the
@@ -251,10 +263,16 @@ pub fn title_action_icon(theme: IconTheme, action: TitleAction) -> &'static str 
         (IconTheme::Material, TitleAction::NewFolder) => "\u{ea80}", //  cod-new_folder
         (IconTheme::Material, TitleAction::Refresh) => "\u{eb37}", //  cod-refresh
         (IconTheme::Material, TitleAction::CollapseAll) => "\u{eac5}", //  cod-collapse_all
+        (IconTheme::Material, TitleAction::ExpandAll) => "\u{eb95}", //  cod-expand_all
+        (IconTheme::Material, TitleAction::Sync) => "\u{f0140}",
+        (IconTheme::Material, TitleAction::Commit) => "\u{f012c}",
         (IconTheme::Emoji, TitleAction::NewFile) => "📄",
         (IconTheme::Emoji, TitleAction::NewFolder) => "📁",
         (IconTheme::Emoji, TitleAction::Refresh) => "⟳",
         (IconTheme::Emoji, TitleAction::CollapseAll) => "⊟",
+        (IconTheme::Emoji, TitleAction::ExpandAll) => "⊞",
+        (IconTheme::Emoji, TitleAction::Sync) => "⇅",
+        (IconTheme::Emoji, TitleAction::Commit) => "✓",
     }
 }
 
@@ -299,6 +317,47 @@ pub fn title_action_spans(
         cx += w;
     }
     (spans, zones)
+}
+
+/// Lay out a title/repository row with optional fixed right-edge actions.
+/// Detail text yields first, then the label truncates; action spans and their
+/// hitboxes are generated together so rendering and clicks cannot diverge.
+pub fn hover_action_row(
+    theme: IconTheme,
+    prefix: Vec<Span<'static>>,
+    label: Span<'static>,
+    detail: Span<'static>,
+    actions: Option<&[TitleAction]>,
+    area: Rect,
+    hover: Option<(u16, u16)>,
+) -> (Vec<Span<'static>>, Vec<(Rect, TitleAction)>) {
+    let actions_w = actions.map_or(0, |actions| title_actions_width(theme, actions));
+    let content_w = usize::from(area.width.saturating_sub(actions_w));
+    let prefix_w: usize = prefix.iter().map(Span::width).sum();
+    let detail_avail = content_w
+        .saturating_sub(prefix_w + label.width())
+        .saturating_sub(1);
+    let detail = truncate_span(detail, detail_avail);
+    let detail_gap = usize::from(detail.width() > 0);
+    let label_avail = content_w.saturating_sub(prefix_w + detail.width() + detail_gap);
+    let label = truncate_span(label, label_avail);
+    let pad = content_w.saturating_sub(prefix_w + label.width() + detail.width());
+    let mut spans = prefix;
+    spans.extend([label, Span::raw(" ".repeat(pad)), detail]);
+    let zones = if let Some(actions) = actions {
+        let x = area.x + area.width.saturating_sub(actions_w);
+        let (action_spans, zones) = title_action_spans(theme, actions, x, area.y, hover);
+        spans.extend(action_spans);
+        zones
+    } else {
+        Vec::new()
+    };
+    (spans, zones)
+}
+
+fn truncate_span(span: Span<'static>, max: usize) -> Span<'static> {
+    let style = span.style;
+    Span::styled(truncate_to(span.content.into_owned(), max), style)
 }
 
 /// Permanent hard-redraw button beside Settings. Unlike the hover Refresh
@@ -542,9 +601,12 @@ mod tests {
                 TitleAction::NewFolder,
                 TitleAction::Refresh,
                 TitleAction::CollapseAll,
+                TitleAction::ExpandAll,
+                TitleAction::Sync,
+                TitleAction::Commit,
             ];
             let (spans, zones) = title_action_spans(theme, &actions, 10, 0, None);
-            assert_eq!(spans.len(), 4);
+            assert_eq!(spans.len(), 7);
             let mut x = 10;
             for (rect, _) in &zones {
                 assert_eq!(rect.x, x, "chips tile left to right with no gaps");
@@ -560,11 +622,21 @@ mod tests {
     }
 
     #[test]
-    fn title_actions_hide_without_recent_mouse() {
-        assert!(!title_actions_visible(None));
-        assert!(title_actions_visible(Some(std::time::Instant::now())));
+    fn title_actions_require_recent_mouse_on_the_title_row() {
+        let title = Rect::new(0, 2, 30, 1);
+        assert!(!title_actions_visible(None, Some((4, 2)), title));
+        assert!(title_actions_visible(
+            Some(std::time::Instant::now()),
+            Some((4, 2)),
+            title,
+        ));
+        assert!(!title_actions_visible(
+            Some(std::time::Instant::now()),
+            Some((4, 3)),
+            title,
+        ));
         let old = std::time::Instant::now() - TITLE_ACTIONS_LINGER - std::time::Duration::from_secs(1);
-        assert!(!title_actions_visible(Some(old)));
+        assert!(!title_actions_visible(Some(old), Some((4, 2)), title));
     }
 
     #[test]

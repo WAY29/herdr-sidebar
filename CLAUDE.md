@@ -487,14 +487,19 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   the glyph color; active/toggled styling is separate from hover. Mouse motion only updates
   hover state — actions run exclusively on `MouseEventKind::Down(MouseButton::Left)`. This
   includes activity-bar views, Search/Clear, Retry, hard redraw, Settings, and title actions.
-- **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
-  hover buttons at the header's top-right (Explorer: New File / New Folder / Refresh /
-  Collapse All; SCM: Refresh / Collapse All), left of the standalone ⚙. Terminals emit NO
-  "mouse left the pane" event, so hover is approximated: any mouse event shows them, and
-  they fade `TITLE_ACTIONS_LINGER` (3s) after the last one — motion re-shows them before a
-  click ever lands, and click zones are only populated while drawn, so a click can never
-  trigger an invisible button. Material theme uses the Nerd Font's bundled **codicons**
-  (cod-new_file EA7F / cod-new_folder EA80 / cod-refresh EB37 / cod-collapse_all EAC5 —
+- **Title/repository action rows** (`ui.rs` `hover_action_row`): one shared layout and
+  hit-test model covers Explorer titles, the SCM main-repository title, and multi-repo child
+  headers. Detail text yields first, then long project/repository names truncate before a
+  fixed action tail; the same function creates the rendered spans and click rectangles, so
+  hidden actions are never clickable. Explorer passes New File / New Folder / Refresh /
+  Collapse All; the SCM main repository passes Refresh / Collapse All or Expand All; child
+  repositories pass Sync / Commit. Terminals emit NO "mouse left the pane" event, so title
+  actions show only while the last pane-local pointer position is on that specific header row:
+  moving to another row hides them immediately, while leaving the pane falls back to
+  `TITLE_ACTIONS_LINGER` (3s). SCM main and child repository headers also apply the normal
+  full-row hover background only while that row is hovered. Material theme uses the Nerd Font's bundled **codicons**
+  (cod-new_file EA7F / cod-new_folder EA80 / cod-refresh EB37 / cod-collapse_all EAC5 /
+  cod-expand_all EB95 —
   VS Code's own icons; verified in the CaskaydiaCove cmap). Chips are a plain ` X ` (one
   space each side, NO activity-bar-style slack cell): the **Mono NF build renders these
   single-cell**, and a trailing slack cell pushes the glyph's right edge to the chip's
@@ -514,9 +519,14 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
 - **Multi-repo**: `Git::discover_all` lists the repo containing the cwd plus child repos two
   levels down (`.git` dir or file), skipping `target`/`node_modules`/`.claude` (the agent
   worktrees under `.claude/worktrees` would otherwise show up as repos). With >1 repo the
-  layout mirrors VS Code's: each repo section carries its OWN inline message box (3-line
-  bordered list row) and ✓ Commit button, and the repo header row shows `⎇branch*` (star =
-  dirty) plus clickable ⟳ sync / ✓ commit icons in the fixed last-6 columns. A full-width heavy
+  layout mirrors VS Code's: each repo section carries its OWN inline message box and compact
+  ✓ Commit button. Single-repo Commit and optional Sync Changes use the same one-row filled
+  control. A terminal cannot overlay a pixel border around a text cell, so do not simulate one
+  with partial edge glyphs or extra rows/columns; the button layout and hitbox remain exactly one
+  row with no blank padding.
+  A child repo header shows `⎇branch*` (star = dirty)
+  while idle; hover gives clickable ⟳ sync / ✓ commit icons priority in the shared fixed action
+  tail and truncates the repo name first. A full-width heavy
   separator starts the multi-repo area and every repository block ends with one, including the
   last one before Graph and the remaining drawers; separators are display-only and keyboard/mouse
   navigation skips them.
@@ -529,8 +539,14 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   Tree (default) and the legacy List; Tree compacts single-child directory chains, sorts
   directories first, defaults new paths open, and keeps separate in-process collapsed sets
   for Staged and Changes. Directory rows support chevron/name-double-click/Enter/Space/h/l,
-  plus hover and context-menu bulk stage/unstage. `Collapse All` clears expanded history and
-  folds the inner trees as well as their outer sections. A directory bulk action sends ONE Git
+  plus hover and context-menu bulk stage/unstage. The title action derives its state only from
+  the repository area: `Collapse All` folds message boxes, Commit/Sync Changes actions, repos,
+  Staged/Changes sections, and their inner trees, then changes to `Expand All`; expanding opens
+  that same area and clears the live status trees' collapsed-directory sets. Single-repo fixed
+  controls and multi-repo inline rows must both read the same `repo.collapsed` state. A heavy
+  separator always ends the repository area, including single-repo mode. Graph and every later
+  drawer are a separate component below it and keep their own expansion plus expanded-ref state
+  across Collapse/Expand All. A directory bulk action sends ONE Git
   command with the directory prefix instead of expanding every descendant into argv (large trees
   hit Unix `ARG_MAX` and the lower Windows command-line limit); a cross-directory rename adds only
   the old path outside that prefix so both halves still move together. Directory operations restore

@@ -18,9 +18,9 @@ use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
     TitleAction, activity_button_style, activity_icons, draw_option_picker, draw_scrollbar,
-    gear_icon, hits, hits_collapse_button, icon_button_style, input_tail, option_picker_index,
-    redraw_button, sibling_panes_of, title_action_spans, title_actions_visible,
-    title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
+    gear_icon, hits, hits_collapse_button, hover_action_row, icon_button_style, input_tail,
+    option_picker_index, redraw_button, sibling_panes_of, title_actions_visible, truncate_to,
+    wrap_footer_message, wrap_hints,
 };
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::workspace_sync::ExplorerState;
@@ -206,8 +206,8 @@ pub struct App {
     /// The hover title-bar buttons' click zones from the last draw (empty
     /// while they are hidden).
     title_zones: Vec<(Rect, TitleAction)>,
-    /// When the mouse last moved/clicked/scrolled over this pane — the hover
-    /// approximation that shows the title-bar buttons (see
+    /// When the mouse last moved/clicked/scrolled over this pane — the leave
+    /// fallback for a pointer last seen on the title row (see
     /// [`herdr_sidebar::ui::TITLE_ACTIONS_LINGER`]).
     last_mouse: Option<std::time::Instant>,
     /// Last known mouse position, for the button hover highlight.
@@ -641,8 +641,8 @@ impl App {
 
     /// `Some(exit)` ends the event loop, mirroring on_key.
     pub fn on_mouse(&mut self, mouse: MouseEvent) -> Option<Exit> {
-        // Any mouse activity = "the mouse is over this pane": it shows the
-        // hover title-bar buttons until the linger expires.
+        // Keep the last pane-local pointer position for row and title hover.
+        // The timestamp is only a fallback for terminals lacking leave events.
         self.last_mouse = Some(std::time::Instant::now());
         self.mouse_pos = Some((mouse.column, mouse.row));
         if self.overlay.is_some() {
@@ -741,6 +741,7 @@ impl App {
                 self.scroll = 0;
                 self.rebuild();
             }
+            TitleAction::ExpandAll | TitleAction::Sync | TitleAction::Commit => {}
         }
     }
 
@@ -1674,36 +1675,32 @@ impl App {
             .unwrap_or(0) as u16;
         let redraw_w = if gear.is_some() { 3 } else { 0 };
         self.title_zones.clear();
-        let (action_spans, actions_w) = if title_actions_visible(self.last_mouse) {
-            let actions = [
-                TitleAction::NewFile,
-                TitleAction::NewFolder,
-                TitleAction::Refresh,
-                TitleAction::CollapseAll,
-            ];
-            let w = title_actions_width(self.theme, &actions);
-            let ax = area.x + area.width.saturating_sub(gear_w + redraw_w + w);
-            let (spans, zones) =
-                title_action_spans(self.theme, &actions, ax, area.y, self.mouse_pos);
-            self.title_zones = zones;
-            (spans, w)
-        } else {
-            (Vec::new(), 0)
-        };
-        // The name yields to the buttons and gear in narrow panes.
-        let avail = usize::from(area.width.saturating_sub(gear_w + redraw_w + actions_w));
-        let root_label =
-            truncate_to(format!(" {}", self.tree.root_name().to_uppercase()), avail);
-        let name = Span::styled(root_label, Style::default().bold().fg(Color::LightBlue));
-        let pad = usize::from(area.width)
-            .saturating_sub(
-                name.width()
-                    + usize::from(actions_w)
-                    + usize::from(redraw_w)
-                    + usize::from(gear_w),
-            );
-        let mut spans = vec![name, Span::raw(" ".repeat(pad))];
-        spans.extend(action_spans);
+        let actions = [
+            TitleAction::NewFile,
+            TitleAction::NewFolder,
+            TitleAction::Refresh,
+            TitleAction::CollapseAll,
+        ];
+        let header_area = Rect::new(
+            area.x,
+            area.y,
+            area.width.saturating_sub(gear_w + redraw_w),
+            1,
+        );
+        let (mut spans, zones) = hover_action_row(
+            self.theme,
+            vec![Span::raw(" ")],
+            Span::styled(
+                self.tree.root_name().to_uppercase(),
+                Style::default().bold().fg(Color::LightBlue),
+            ),
+            Span::raw(""),
+            title_actions_visible(self.last_mouse, self.mouse_pos, area)
+                .then_some(actions.as_slice()),
+            header_area,
+            self.mouse_pos,
+        );
+        self.title_zones = zones;
         if redraw_w > 0 {
             let rx = area.x + area.width.saturating_sub(gear_w + redraw_w);
             let (redraw, rect) = redraw_button(self.theme, rx, area.y, self.mouse_pos);

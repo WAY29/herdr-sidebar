@@ -114,6 +114,16 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
   including deleted paths; switch the global SCM file view in ⚙ Settings when a flat list
   is more useful. Folder rows fold and bulk-stage/unstage; hover `⋯` opens path-aware file
   and folder menus without taking over herdr's normal pane right click.
+- **Collapse or expand repository content** — the title action toggles between Collapse All and
+  Expand All for the repository area: message box, Commit, Sync Changes, repository sections,
+  and Staged/Changes trees. A heavy divider separates that area from Graph and the later drawers,
+  whose expansion is unchanged.
+- **Project headers keep actions reachable** — hover the current project's SCM header for
+  Refresh and Collapse/Expand All. Long names truncate before the fixed action area; moving to
+  another row hides it immediately, and the hovered repository header gets a full-row highlight.
+- **Clear commit controls** — Commit and optional Sync Changes use compact one-row color blocks;
+  the message box, buttons, and Changes section sit together without extra layout or blank
+  padding rows.
 - Structured diffs hide long unchanged sections by default; toggle **Hide unmodified lines**
   in ⚙ Settings to show all retained context immediately and center the first change.
 - **✧ AI commit messages** — the sparkle button sends the pending diff to your local
@@ -122,9 +132,10 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
 - **Sync Changes** — a `⇅ 1↑ 2↓` button appears when you're ahead/behind upstream; one
   press runs `pull --rebase --autostash` + `push` in the background.
 - **Multi-repo** — child repositories are auto-discovered, each with its
-  own header (branch, dirty `*`, sync/commit icons), message box, and Commit button. Full-width
-  dividers frame the repository area, separate every repository block, and mark the shared
-  history drawers below them.
+  own header (branch, dirty `*`, sync/commit icons), message box, and Commit button. Child repo
+  headers use the same hover, truncation, and hitbox model as the main project header, with
+  Sync/Commit as their actions. Full-width dividers frame the repository area,
+  separate every repository block, and mark the shared history drawers below them.
 - **History drawers**: GRAPH, COMMITS, FILE HISTORY (follows renames), BRANCHES, REMOTES,
   STASHES, TAGS. Commits, branches, stashes, and tags expand into file trees whose leaves
   open the same structured, syntax-highlighted diff as live changes.
