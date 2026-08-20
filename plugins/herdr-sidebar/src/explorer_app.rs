@@ -367,7 +367,13 @@ impl App {
         self.merged()
     }
 
-    pub fn reveal_quick_open(&mut self, request_root: &Path, relative: &Path, is_dir: bool) -> bool {
+    pub fn reveal_quick_open(
+        &mut self,
+        request_root: &Path,
+        relative: &Path,
+        is_dir: bool,
+        line: Option<usize>,
+    ) -> bool {
         let root = self.tree.root_path();
         let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
         let canonical_request =
@@ -415,7 +421,7 @@ impl App {
             ctl.focus();
         }
         if !actual_is_dir {
-            self.open_preview(&target);
+            self.open_preview_at(&target, line);
         }
         true
     }
@@ -448,11 +454,18 @@ impl App {
     /// visible): the shared viewer client reuses the tab's viewer pane or
     /// spawns one next to us.
     fn open_preview(&mut self, path: &Path) {
+        self.open_preview_at(path, None);
+    }
+
+    fn open_preview_at(&mut self, path: &Path, line: Option<usize>) {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|c| c.pane_id.clone()) else {
             self.notice = Some("preview needs a herdr pane".into());
             return;
         };
-        let payload = herdr_sidebar::viewer::file_request(path);
+        let payload = line.map_or_else(
+            || herdr_sidebar::viewer::file_request(path),
+            |line| herdr_sidebar::viewer::file_line_request(path, line),
+        );
         if let Err(e) = herdr_sidebar::viewer::open_in_pane(
             &pane_id,
             &self.tree.root_path(),

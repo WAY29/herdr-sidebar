@@ -33,6 +33,7 @@ pub const METADATA_SOURCE: &str = "herdr-sidebar-preview";
 
 /// How often the control file is re-checked while idle.
 const POLL: Duration = Duration::from_millis(250);
+const SOURCE_LINE_HIGHLIGHT: Duration = Duration::from_secs(3);
 
 /// Preview size guards: don't slurp huge files into a pane.
 const MAX_BYTES: usize = 1024 * 1024;
@@ -88,6 +89,10 @@ pub fn control_path(sidebar_pane_id: &str) -> PathBuf {
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Request {
     File(PathBuf),
+    FileLine {
+        path: PathBuf,
+        line: usize,
+    },
     SearchFile {
         path: PathBuf,
         line: usize,
@@ -121,6 +126,12 @@ enum Request {
 /// Control-file payload for a file preview.
 pub fn file_request(path: &Path) -> String {
     format!("file\t{}", path.display())
+}
+
+/// Control-file payload for a file preview anchored to one source line.
+pub fn file_line_request(path: &Path, line: usize) -> String {
+    let payload = serde_json::json!({ "path": path, "line": line });
+    format!("fileline\t{payload}")
 }
 
 /// Control-file payload for a file preview anchored to one search hit.
@@ -216,6 +227,18 @@ fn parse_request(raw: &str) -> Option<Request> {
                 whole_word: payload.whole_word,
             })
         }
+        Some("fileline") => {
+            #[derive(serde::Deserialize)]
+            struct Payload {
+                path: PathBuf,
+                line: usize,
+            }
+            let payload: Payload = serde_json::from_str(parts.next()?).ok()?;
+            Some(Request::FileLine {
+                path: payload.path,
+                line: payload.line,
+            })
+        }
         Some("file") => Some(Request::File(PathBuf::from(parts.next()?))),
         // Legacy: a bare path.
         _ => Some(Request::File(PathBuf::from(raw))),
@@ -237,6 +260,8 @@ struct Doc {
     visual_width: u16,
     first_change: Option<usize>,
     center_first_change_pending: bool,
+    center_source_row_pending: Option<usize>,
+    highlighted_source_row: Option<(usize, Instant)>,
 }
 
 impl Doc {
@@ -259,6 +284,8 @@ impl Doc {
             visual_width: 0,
             first_change: None,
             center_first_change_pending: false,
+            center_source_row_pending: None,
+            highlighted_source_row: None,
         }
     }
 
@@ -291,11 +318,31 @@ impl Doc {
         self.center_first_change_pending = self.first_change.is_some();
     }
 
+    fn request_source_line(&mut self, line: usize, highlight: bool) {
+        let row = line
+            .saturating_sub(1)
+            .min(self.lines.len().saturating_sub(1));
+        self.center_source_row_pending = Some(row);
+        self.highlighted_source_row =
+            highlight.then(|| (row, Instant::now() + SOURCE_LINE_HIGHLIGHT));
+    }
+
+    fn apply_source_line_center(&mut self, height: u16) {
+        let Some(source_row) = self.center_source_row_pending.take() else {
+            return;
+        };
+        self.center_on_source_row(source_row, height);
+    }
+
     fn apply_first_change_center(&mut self, height: u16) {
         if !std::mem::take(&mut self.center_first_change_pending) {
             return;
         }
         let Some(source_row) = self.first_change else { return };
+        self.center_on_source_row(source_row, height);
+    }
+
+    fn center_on_source_row(&mut self, source_row: usize, height: u16) {
         let visual_row = if self.visual_width == 0 {
             source_row
         } else {
@@ -307,6 +354,12 @@ impl Doc {
         let height = usize::from(height).max(1);
         let max_scroll = self.visual_len().saturating_sub(height);
         self.scroll = visual_row.saturating_sub(height / 2).min(max_scroll);
+    }
+
+    fn active_source_highlight(&self) -> Option<usize> {
+        self.highlighted_source_row
+            .filter(|(_, until)| Instant::now() < *until)
+            .map(|(row, _)| row)
     }
 }
 
@@ -417,6 +470,7 @@ fn load(
 ) -> Doc {
     match request {
         Request::File(path) => load_file(path, diff_theme),
+        Request::FileLine { path, line } => load_file_at(path, *line, diff_theme),
         Request::SearchFile { path, line, query, regex, case_sensitive, whole_word } => {
             load_search_file(path, *line, query, *regex, *case_sensitive, *whole_word, diff_theme)
         }
@@ -433,6 +487,17 @@ fn load(
             expanded_folds,
         ),
         Request::Show { root, spec, path } => load_show(root, spec, path.as_deref()),
+    }
+}
+
+fn prepare_new_request(doc: &mut Doc, request: &Request, hide_unmodified: bool) {
+    match request {
+        Request::FileLine { line, .. } => doc.request_source_line(*line, true),
+        Request::SearchFile { line, .. } => doc.request_source_line(*line, false),
+        Request::Diff { .. } | Request::RefDiff { .. } if !hide_unmodified => {
+            doc.request_first_change_center();
+        }
+        _ => {}
     }
 }
 
@@ -518,7 +583,11 @@ fn glow_markdown(text: &str, width: u16) -> Option<Vec<Line<'static>>> {
 }
 
 fn load_file(target: &Path, diff_theme: DiffTheme) -> Doc {
-    load_file_inner(target, diff_theme, None)
+    load_file_inner(target, diff_theme, None, None)
+}
+
+fn load_file_at(target: &Path, line: usize, diff_theme: DiffTheme) -> Doc {
+    load_file_inner(target, diff_theme, None, Some(line))
 }
 
 fn load_search_file(
@@ -530,19 +599,19 @@ fn load_search_file(
     whole_word: bool,
     diff_theme: DiffTheme,
 ) -> Doc {
-    let mut doc = load_file_inner(
+    load_file_inner(
         target,
         diff_theme,
         Some((query, regex, case_sensitive, whole_word)),
-    );
-    doc.scroll = line.saturating_sub(5).saturating_sub(1);
-    doc
+        Some(line),
+    )
 }
 
 fn load_file_inner(
     target: &Path,
     diff_theme: DiffTheme,
     search: Option<(&str, bool, bool, bool)>,
+    source_line: Option<usize>,
 ) -> Doc {
     let name = target
         .file_name()
@@ -568,8 +637,7 @@ fn load_file_inner(
                 // line-number gutter; ideal fix is to pass body.width from draw_doc.
                 let glow_width =
                     crossterm::terminal::size().map(|(w, _)| w.saturating_sub(6)).unwrap_or(74);
-                let glow_rendered = search_re
-                    .is_none()
+                let glow_rendered = (search_re.is_none() && source_line.is_none())
                     .then(|| is_markdown.then(|| glow_markdown(&text, glow_width)).flatten())
                     .flatten();
                 // Glow-rendered markdown gets no line numbers (it formats its own layout).
@@ -997,9 +1065,7 @@ impl InlinePreview {
             self.hide_unmodified,
             &self.expanded_folds,
         );
-        if !self.hide_unmodified {
-            doc.request_first_change_center();
-        }
+        prepare_new_request(&mut doc, &request, self.hide_unmodified);
         self.doc = Some(doc);
         self.current = Some(request);
         self.last_refresh = Instant::now();
@@ -1192,9 +1258,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
         .as_ref()
         .map(|request| {
             let mut doc = load(request, diff_theme, hide_unmodified, &expanded_folds);
-            if !hide_unmodified {
-                doc.request_first_change_center();
-            }
+            prepare_new_request(&mut doc, request, hide_unmodified);
             doc
         })
         .unwrap_or_else(|| {
@@ -1288,9 +1352,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                     diff_theme = state.diff_theme;
                     hide_unmodified = state.hide_unmodified;
                     doc = load(request, diff_theme, hide_unmodified, &expanded_folds);
-                    if !hide_unmodified {
-                        doc.request_first_change_center();
-                    }
+                    prepare_new_request(&mut doc, request, hide_unmodified);
                     report_identity(&doc.name);
                 }
             } else if beat.is_multiple_of(8)
@@ -1337,10 +1399,12 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> (
     .areas(area);
 
     doc.ensure_visual_lines(body.width);
+    doc.apply_source_line_center(body.height);
     doc.apply_first_change_center(body.height);
     doc.scroll = doc
         .scroll
         .min(doc.visual_len().saturating_sub(usize::from(body.height).max(1)));
+    let highlighted_source_row = doc.active_source_highlight();
 
     let file_icon = icon(theme, &doc.name, false, false);
     let icon_style = match file_icon.rgb {
@@ -1383,7 +1447,7 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> (
             .skip(doc.scroll)
             .take(usize::from(body.height))
             .map(|(n, line)| {
-                if doc.numbered {
+                let mut line = if doc.numbered {
                     let mut spans = vec![Span::styled(
                         format!("{:>number_width$} ", n + 1),
                         Style::default().dim(),
@@ -1391,15 +1455,18 @@ fn draw_doc(frame: &mut Frame, doc: &mut Doc, theme: IconTheme, area: Rect) -> (
                     spans.extend(line.spans.iter().cloned());
                     Line::from(spans)
                 } else {
-                    let mut line = line.clone();
-                    if line.style.bg.is_some() {
-                        let pad = usize::from(body.width).saturating_sub(line.width());
-                        if pad > 0 {
-                            line.spans.push(Span::raw(" ".repeat(pad)));
-                        }
-                    }
-                    line
+                    line.clone()
+                };
+                if highlighted_source_row == Some(n) {
+                    line.style = line.style.bg(Color::DarkGray);
                 }
+                if line.style.bg.is_some() {
+                    let pad = usize::from(body.width).saturating_sub(line.width());
+                    if pad > 0 {
+                        line.spans.push(Span::raw(" ".repeat(pad)));
+                    }
+                }
+                line
             })
             .collect()
     };
@@ -1763,6 +1830,14 @@ mod tests {
     fn requests_roundtrip() {
         let f = file_request(Path::new("C:/x/y.rs"));
         assert_eq!(parse_request(&f), Some(Request::File(PathBuf::from("C:/x/y.rs"))));
+        let f = file_line_request(Path::new("C:/x/y.rs"), 42);
+        assert_eq!(
+            parse_request(&f),
+            Some(Request::FileLine {
+                path: PathBuf::from("C:/x/y.rs"),
+                line: 42,
+            })
+        );
         let sf = search_file_request(Path::new("C:/x/y.rs"), 42, "main", false, false, true);
         assert_eq!(
             parse_request(&sf),
@@ -1825,6 +1900,34 @@ mod tests {
             Some(Request::File(PathBuf::from("C:/plain.txt")))
         );
         assert_eq!(parse_request("  "), None);
+    }
+
+    #[test]
+    fn file_line_preview_keeps_source_lines_and_centers_target() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-sidebar-file-line-{}.md",
+            std::process::id()
+        ));
+        let text = (1..=100)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, text).unwrap();
+
+        let request = Request::FileLine {
+            path: path.clone(),
+            line: 42,
+        };
+        let mut doc = load(&request, crate::syntax::DEFAULT_DIFF_THEME, true, &HashSet::new());
+        prepare_new_request(&mut doc, &request, true);
+        doc.apply_source_line_center(21);
+
+        assert!(doc.numbered, "line anchors must bypass glow reformatting");
+        assert_eq!(doc.scroll, 31);
+        assert_eq!(doc.active_source_highlight(), Some(41));
+        assert_eq!(doc.lines[41].to_string(), "line 42");
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

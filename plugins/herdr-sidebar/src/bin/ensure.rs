@@ -5,6 +5,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--open-link") {
+        let _ = herdr_sidebar::open_mailbox::open_clicked_link();
+        return;
+    }
     if std::env::args().any(|arg| arg == "--quick-open") {
         let _ = herdr_sidebar::ensure::open_quick();
         return;

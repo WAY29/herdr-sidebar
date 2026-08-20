@@ -105,6 +105,34 @@ title = "Quick Open"
 description = "Fuzzy-search files and folders in the current Sidebar root."
 command = ["wscript", "//B", "scripts/launch-ensure.vbs", "--quick-open"]
 
+[[actions]]
+id = "open-file-link"
+platforms = ["linux", "macos"]
+title = "Open file link in Sidebar"
+description = "Reveal a clicked local file link in Explorer and open it in Preview."
+command = ["sh", "-c", 'exec "$HERDR_PLUGIN_ROOT/target/release/herdr-sidebar-ensure" --open-link']
+
+[[actions]]
+id = "open-file-link-windows"
+platforms = ["windows"]
+title = "Open file link in Sidebar"
+description = "Reveal a clicked local file link in Explorer and open it in Preview."
+command = ["wscript", "//B", "scripts/launch-ensure.vbs", "--open-link"]
+
+[[link_handlers]]
+id = "local-file"
+platforms = ["linux", "macos"]
+title = "Open local file in Sidebar"
+pattern = '^(file://|/)'
+action = "open-file-link"
+
+[[link_handlers]]
+id = "local-file-windows"
+platforms = ["windows"]
+title = "Open local file in Sidebar"
+pattern = '^(file://|[A-Za-z]:[\\/])'
+action = "open-file-link-windows"
+
 # Separated-panels mode: open the Source Control pane on its own (the ⚙
 # settings' "Unified sidebar: off"). The explorer side is what the sidebar
 # opens by default.

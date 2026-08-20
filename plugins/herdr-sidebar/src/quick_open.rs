@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -8,69 +8,19 @@ use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use herdr_sidebar::icons::{IconTheme, icon};
+use herdr_sidebar::open_mailbox::{self, Target};
+use herdr_sidebar::state;
+use herdr_sidebar::ui::{draw_scrollbar, hits, icon_button_style, input_tail, truncate_to};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
-use serde::{Deserialize, Serialize};
 
-use herdr_sidebar::icons::{IconTheme, icon};
-use herdr_sidebar::ui::{draw_scrollbar, hits, icon_button_style, input_tail, truncate_to};
-use herdr_sidebar::{ipc, launch, state};
+pub use herdr_sidebar::open_mailbox::Inbox;
 
 const MAX_RESULTS: usize = 500;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OpenRequest {
-    pub root: PathBuf,
-    pub path: PathBuf,
-    pub is_dir: bool,
-}
-
-pub struct Inbox {
-    path: Option<PathBuf>,
-    pending: Option<OpenRequest>,
-}
-
-impl Inbox {
-    pub fn for_current_pane() -> Self {
-        let path = std::env::var("HERDR_PANE_ID")
-            .ok()
-            .filter(|id| !id.is_empty())
-            .and_then(|id| request_path(&id));
-        Self {
-            path,
-            pending: None,
-        }
-    }
-
-    pub fn poll(&mut self) -> bool {
-        if self.pending.is_some() {
-            return true;
-        }
-        let Some(path) = &self.path else { return false };
-        let Ok(bytes) = std::fs::read(path) else {
-            return false;
-        };
-        let _ = std::fs::remove_file(path);
-        self.pending = serde_json::from_slice(&bytes)
-            .ok()
-            .filter(|request: &OpenRequest| safe_relative(&request.path));
-        self.pending.is_some()
-    }
-
-    pub fn take(&mut self) -> Option<OpenRequest> {
-        self.poll();
-        self.pending.take()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Target {
-    pane_id: String,
-    root: PathBuf,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
@@ -128,7 +78,7 @@ impl App {
 
     fn retry(&mut self) {
         self.error = None;
-        match locate_target() {
+        match open_mailbox::locate_target() {
             Ok(target) => {
                 self.root.clone_from(&target.root);
                 self.target = Some(target);
@@ -221,7 +171,7 @@ impl App {
         else {
             return false;
         };
-        match send_request(&target, &entry) {
+        match open_mailbox::send_request(&target, &entry.path, entry.is_dir, None) {
             Ok(()) => true,
             Err(error) => {
                 self.error = Some(error);
@@ -577,7 +527,7 @@ fn entries_from_rg(output: &[u8]) -> Result<Vec<Entry>, String> {
         .filter(|part| !part.is_empty())
     {
         let path = PathBuf::from(String::from_utf8_lossy(raw).into_owned());
-        if !safe_relative(&path) {
+        if !open_mailbox::safe_relative(&path) {
             continue;
         }
         // ponytail: directories are derived from rg's file list; use an
@@ -633,151 +583,6 @@ fn fuzzy_rank(candidate: &str, query: &str) -> Option<(usize, usize, usize)> {
     Some((gaps, positions[0], candidate.len()))
 }
 
-fn locate_target() -> Result<Target, String> {
-    #[derive(Deserialize, Default)]
-    struct Context {
-        #[serde(default)]
-        workspace_id: String,
-        #[serde(default)]
-        tab_id: String,
-        #[serde(default)]
-        focused_pane_cwd: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Message {
-        result: ResultBody,
-    }
-    #[derive(Deserialize)]
-    struct ResultBody {
-        #[serde(default)]
-        panes: Vec<Pane>,
-    }
-    #[derive(Deserialize)]
-    struct Pane {
-        pane_id: Option<String>,
-        workspace_id: Option<String>,
-        tab_id: Option<String>,
-        cwd: Option<String>,
-        foreground_cwd: Option<String>,
-        #[serde(default)]
-        focused: bool,
-        #[serde(default)]
-        agent: Option<serde_json::Value>,
-        #[serde(default)]
-        tokens: serde_json::Map<String, serde_json::Value>,
-    }
-
-    let context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON")
-        .ok()
-        .and_then(|json| serde_json::from_str::<Context>(&json).ok())
-        .unwrap_or_default();
-    let json = ipc::call_text("pane.list", serde_json::json!({}))
-        .map_err(|error| format!("Could not inspect the current tab: {error}"))?;
-    let message: Message = serde_json::from_str(json.trim_start_matches('\u{feff}'))
-        .map_err(|error| format!("Could not read the pane list: {error}"))?;
-    let focused = message.result.panes.iter().find(|pane| pane.focused);
-    let workspace_id = if context.workspace_id.is_empty() {
-        focused.and_then(|pane| pane.workspace_id.as_deref())
-    } else {
-        Some(context.workspace_id.as_str())
-    };
-    let tab_id = if context.tab_id.is_empty() {
-        focused.and_then(|pane| pane.tab_id.as_deref())
-    } else {
-        Some(context.tab_id.as_str())
-    };
-    let now = state::unix_now();
-    let pane = message
-        .result
-        .panes
-        .iter()
-        .filter(|pane| pane.agent.is_none())
-        .filter(|pane| pane.workspace_id.as_deref() == workspace_id)
-        .filter(|pane| pane.tab_id.as_deref() == tab_id)
-        .filter_map(|pane| {
-            let stamp = pane
-                .tokens
-                .get("herdr-sidebar-explorer")
-                .and_then(|value| value.as_str())
-                .and_then(|value| value.parse::<u64>().ok())?;
-            (now.saturating_sub(stamp) <= launch::HEARTBEAT_STALE_SECS).then_some((stamp, pane))
-        })
-        .max_by_key(|(stamp, _)| *stamp)
-        .map(|(_, pane)| pane)
-        .ok_or_else(|| "No live Explorer is open in the current tab.".to_string())?;
-    let root = pane
-        .foreground_cwd
-        .as_deref()
-        .or(pane.cwd.as_deref())
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-        .or_else(|| {
-            context
-                .focused_pane_cwd
-                .map(PathBuf::from)
-                .filter(|path| path.is_dir())
-        })
-        .ok_or_else(|| "Could not determine the Explorer root folder.".to_string())?;
-    Ok(Target {
-        pane_id: pane
-            .pane_id
-            .clone()
-            .ok_or_else(|| "Explorer pane has no id.".to_string())?,
-        root: std::fs::canonicalize(&root).unwrap_or(root),
-    })
-}
-
-fn send_request(target: &Target, entry: &Entry) -> Result<(), String> {
-    let request = OpenRequest {
-        root: target.root.clone(),
-        path: entry.path.clone(),
-        is_dir: entry.is_dir,
-    };
-    let path = request_path(&target.pane_id)
-        .ok_or_else(|| "Could not resolve the Sidebar state directory.".to_string())?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Quick Open request path has no parent.".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create the Quick Open mailbox: {error}"))?;
-    let bytes = serde_json::to_vec(&request)
-        .map_err(|error| format!("Could not encode the Quick Open request: {error}"))?;
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&tmp, bytes)
-        .map_err(|error| format!("Could not write the Quick Open request: {error}"))?;
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&path);
-        std::fs::rename(&tmp, &path)
-            .map_err(|error| format!("Could not publish the Quick Open request: {error}"))?;
-    }
-    Ok(())
-}
-
-fn request_path(pane_id: &str) -> Option<PathBuf> {
-    let safe = pane_id
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    Some(
-        state::state_dir()?
-            .join("quick-open")
-            .join(format!("{safe}.json")),
-    )
-}
-
-fn safe_relative(path: &Path) -> bool {
-    !path.as_os_str().is_empty()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,12 +617,5 @@ mod tests {
             path: PathBuf::from("src/main.rs"),
             is_dir: false
         }));
-    }
-
-    #[test]
-    fn mailbox_rejects_paths_that_escape_the_root() {
-        assert!(safe_relative(Path::new("src/main.rs")));
-        assert!(!safe_relative(Path::new("../secret")));
-        assert!(!safe_relative(Path::new("/tmp/secret")));
     }
 }

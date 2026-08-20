@@ -227,6 +227,20 @@ three-cell hover `⋯` button whose left click opens the plugin menu while plain
 herdr's pane menu. Same-tab `pane.move` is a deliberate no-op
 (`SameTab`) — restructure within a tab by bouncing the pane through `--new-tab` and back
 (herdr auto-closes the emptied temp tab).
+- The local Herdr host patch offers an explicit OSC 8 URI to matching plugin `[[link_handlers]]`
+  BEFORE its `http(s)` browser allowlist. A claimed link consumes the Ctrl+left-click; an
+  unclaimed non-web link stays with the source pane, and ordinary web links retain browser
+  fallback. Sidebar registers handlers for Pi's absolute `file://` tool links and absolute-path
+  Markdown links, launches its windowless ensure sidecar, opens a hidden Sidebar if needed, then
+  switches to Explorer, expands/selects the file, and opens the in-process Preview. Source-line
+  anchors accept `#L42` / `?line=42` and absolute path suffixes `:42` / `:42:column`; anchored
+  Markdown bypasses `glow` so displayed line numbers still match the source. The requested source
+  line is centered from the actual Viewer body height on its first draw and receives a full-row
+  selection background for three seconds. Links outside the current Explorer root fall back to
+  the OS default app instead of silently re-rooting Sidebar.
+  This integration requires the patched host; stock Herdr 0.8 still drops `file://` before plugin
+  dispatch. Outer Kitty `open-actions.conf` remains unsuitable because it lacks Herdr's inner
+  pane/tab/session context.
 
 Pane identity & titles:
 

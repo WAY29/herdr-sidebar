@@ -192,7 +192,12 @@ fn run_explorer(
             if request.is_dir {
                 preview.close();
             }
-            if app.reveal_quick_open(&request.root, &request.path, request.is_dir)
+            if app.reveal_quick_open(
+                &request.root,
+                &request.path,
+                request.is_dir,
+                request.line,
+            )
                 && let Some(session) = sync.as_mut()
             {
                 session.set_root(&app.root());

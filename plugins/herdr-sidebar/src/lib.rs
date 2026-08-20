@@ -13,6 +13,7 @@ pub mod git;
 pub mod icons;
 pub mod ipc;
 pub mod launch;
+pub mod open_mailbox;
 pub mod snooze;
 pub mod state;
 pub mod suggest;

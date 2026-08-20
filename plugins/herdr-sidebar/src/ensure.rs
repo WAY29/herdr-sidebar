@@ -44,7 +44,23 @@ use crate::snooze;
 /// focus, and respecting a tab the user toggled closed. Toggle mode (the
 /// action): open-or-focus-or-close, like VS Code's explorer shortcut.
 pub fn run(toggle: bool) -> std::io::Result<()> {
-    let sync_focus = !toggle
+    run_mode(if toggle { Mode::Toggle } else { Mode::Quiet })
+}
+
+/// Make the focused tab's Sidebar visible and focused without toggling it off.
+pub fn show() -> std::io::Result<()> {
+    run_mode(Mode::Show)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Quiet,
+    Toggle,
+    Show,
+}
+
+fn run_mode(mode: Mode) -> std::io::Result<()> {
+    let sync_focus = mode == Mode::Quiet
         && matches!(
             std::env::var("HERDR_PLUGIN_EVENT").as_deref(),
             Ok("tab.focused" | "workspace.focused")
@@ -52,7 +68,7 @@ pub fn run(toggle: bool) -> std::io::Result<()> {
     // Auto-open off (⚙ Settings): hooks leave closed tabs alone; the user's
     // explicit toggle still works. The unix hook script makes the same check
     // via `herdr-sidebar --auto-open`.
-    if !toggle && !crate::state::load_state().auto_open {
+    if mode == Mode::Quiet && !crate::state::load_state().auto_open {
         if sync_focus {
             crate::workspace_sync::restore_focused_tab_sidebar();
         }
@@ -68,24 +84,26 @@ pub fn run(toggle: bool) -> std::io::Result<()> {
     let now = crate::state::unix_now();
     match launch::launch_decision(&panes, now).split_once(' ') {
         Some(("FOCUS", id)) => {
-            if toggle {
+            if mode != Mode::Quiet {
                 focus(id)?;
             }
         }
         Some(("CLOSE", id)) => {
-            if toggle {
+            if mode == Mode::Toggle {
                 ipc::call_text("pane.close", serde_json::json!({ "pane_id": id }))?;
                 snooze::set(&snooze_dir, &tab);
+            } else if mode == Mode::Show {
+                focus(id)?;
             }
         }
         Some(("REPLACE", id)) => {
-            // A dead pane (stale heartbeat): close it and dock a fresh one,
-            // quiet or toggle alike — a corpse should never block the dock.
+            // A dead pane (stale heartbeat): close it and dock a fresh one in
+            // every mode — a corpse should never block the dock.
             ipc::call_text("pane.close", serde_json::json!({ "pane_id": id }))?;
-            open(&panes, toggle)?;
+            open(&panes, mode != Mode::Quiet)?;
         }
         _ => {
-            if toggle {
+            if mode != Mode::Quiet {
                 snooze::clear(&snooze_dir, &tab);
                 open(&panes, true)?;
             } else if !snooze::is_set(&snooze_dir, &tab) {
