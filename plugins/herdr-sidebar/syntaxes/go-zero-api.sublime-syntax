@@ -1,0 +1,81 @@
+%YAML 1.2
+---
+# Based on go-zero's ApiLexer.g4 / ApiParser.g4 language definition.
+name: go-zero API
+file_extensions:
+  - api
+scope: source.go-zero-api
+
+contexts:
+  main:
+    - include: comments
+    - include: strings
+    - match: '\b(type)\s+([A-Za-z_$][A-Za-z0-9_$]*)'
+      captures:
+        1: keyword.declaration.type.go-zero-api
+        2: entity.name.type.go-zero-api
+    - match: '\b(service)\s+([A-Za-z_$][A-Za-z0-9_$]*(?:-[A-Za-z0-9_$]+)*)'
+      captures:
+        1: keyword.declaration.service.go-zero-api
+        2: entity.name.class.service.go-zero-api
+    - match: '(@handler)\s+([A-Za-z_$][A-Za-z0-9_$]*)'
+      captures:
+        1: keyword.other.annotation.go-zero-api
+        2: entity.name.function.handler.go-zero-api
+    - match: '@(?:server|handler|doc)\b'
+      scope: keyword.other.annotation.go-zero-api
+    - match: '(?i:\b(?:get|head|post|put|delete|connect|options|trace|patch)\b)(?=\s+/)'
+      scope: keyword.other.http-method.go-zero-api
+    - match: '\b(?:syntax|import|info|type|service|returns)\b'
+      scope: keyword.control.go-zero-api
+    - match: '\b[A-Za-z_$][A-Za-z0-9_$]*(?=\s*:)'
+      scope: variable.other.member.go-zero-api
+    - match: '(?!//|/\*)/(?:[A-Za-z0-9_$.*{}:-]+(?:/[A-Za-z0-9_$.*{}:-]+)*)?'
+      scope: string.unquoted.path.go-zero-api
+    - match: '\b(?:bool|byte|complex64|complex128|error|float32|float64|int|int8|int16|int32|int64|rune|string|uint|uint8|uint16|uint32|uint64|uintptr|any)\b'
+      scope: storage.type.go-zero-api
+    - match: '\b(?:map|time\.Time)\b|interface\{\}'
+      scope: storage.type.go-zero-api
+    - match: '\b(?:true|false|nil)\b'
+      scope: constant.language.go-zero-api
+    - match: '\b[0-9]+(?:\.[0-9]+)?\b'
+      scope: constant.numeric.go-zero-api
+    - match: '\b[A-Z][A-Za-z0-9_$]*\b'
+      scope: support.type.go-zero-api
+    - match: '(?:=|\*|\[|\]|\{|\}|\(|\)|,)'
+      scope: punctuation.go-zero-api
+
+  comments:
+    - match: '//'
+      scope: punctuation.definition.comment.begin.go-zero-api
+      push:
+        - meta_scope: comment.line.double-slash.go-zero-api
+        - match: '$'
+          pop: true
+    - match: '/\*'
+      scope: punctuation.definition.comment.begin.go-zero-api
+      push:
+        - meta_scope: comment.block.go-zero-api
+        - match: '\*/'
+          scope: punctuation.definition.comment.end.go-zero-api
+          pop: true
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.go-zero-api
+      push:
+        - meta_scope: string.quoted.double.go-zero-api
+        - match: '\\.'
+          scope: constant.character.escape.go-zero-api
+        - match: '"'
+          scope: punctuation.definition.string.end.go-zero-api
+          pop: true
+    - match: '`'
+      scope: punctuation.definition.string.begin.go-zero-api
+      push:
+        - meta_scope: string.quoted.other.go-zero-api
+        - match: '\\.'
+          scope: constant.character.escape.go-zero-api
+        - match: '`'
+          scope: punctuation.definition.string.end.go-zero-api
+          pop: true

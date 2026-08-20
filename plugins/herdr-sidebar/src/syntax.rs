@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, FontStyle};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxDefinition, SyntaxReference, SyntaxSet, SyntaxSetBuilder};
 use syntect::util::LinesWithEndings;
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
@@ -55,8 +55,7 @@ fn overlay_style(background: Option<SyntectColor>, foreground: Option<SyntectCol
 }
 
 pub fn preview_highlight_styles(diff_theme: DiffTheme) -> PreviewHighlightStyles {
-    let (_, themes) = assets();
-    let settings = &themes.get(diff_theme).settings;
+    let settings = &assets().themes.get(diff_theme).settings;
     let selection_background = settings
         .selection
         .or(settings.find_highlight)
@@ -124,10 +123,48 @@ pub fn expand_tabs(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
         .collect()
 }
 
+struct Assets {
+    syntaxes: SyntaxSet,
+    go_zero: SyntaxSet,
+    themes: EmbeddedLazyThemeSet,
+}
+
 /// Grammar + theme assets, loaded once (the bundled dumps take a few ms).
-fn assets() -> &'static (SyntaxSet, EmbeddedLazyThemeSet) {
-    static ASSETS: OnceLock<(SyntaxSet, EmbeddedLazyThemeSet)> = OnceLock::new();
-    ASSETS.get_or_init(|| (two_face::syntax::extra_newlines(), two_face::theme::extra()))
+fn assets() -> &'static Assets {
+    static ASSETS: OnceLock<Assets> = OnceLock::new();
+    ASSETS.get_or_init(|| {
+        let mut go_zero = SyntaxSetBuilder::new();
+        go_zero.add(
+            SyntaxDefinition::load_from_str(
+                include_str!("../syntaxes/go-zero-api.sublime-syntax"),
+                true,
+                None,
+            )
+            .expect("embedded go-zero API syntax must be valid"),
+        );
+        Assets {
+            syntaxes: two_face::syntax::extra_newlines(),
+            go_zero: go_zero.build(),
+            themes: two_face::theme::extra(),
+        }
+    })
+}
+
+fn syntax_for_name<'a>(
+    assets: &'a Assets,
+    name: &str,
+    first_line: Option<&str>,
+) -> Option<(&'a SyntaxSet, &'a SyntaxReference)> {
+    let ext = name.rsplit('.').next().unwrap_or("");
+    if let Some(syntax) = assets.go_zero.find_syntax_by_extension(ext) {
+        return Some((&assets.go_zero, syntax));
+    }
+    assets
+        .syntaxes
+        .find_syntax_by_extension(ext)
+        .or_else(|| assets.syntaxes.find_syntax_by_extension(name))
+        .or_else(|| first_line.and_then(|line| assets.syntaxes.find_syntax_by_first_line(line)))
+        .map(|syntax| (&assets.syntaxes, syntax))
 }
 
 /// Highlight `text` for a file called `name`, up to `max` lines. `None` when
@@ -138,13 +175,9 @@ pub fn highlight(
     max: usize,
     diff_theme: DiffTheme,
 ) -> Option<Vec<Line<'static>>> {
-    let (syntaxes, themes) = assets();
-    let theme = themes.get(diff_theme);
-    let ext = name.rsplit('.').next().unwrap_or("");
-    let syntax = syntaxes
-        .find_syntax_by_extension(ext)
-        .or_else(|| syntaxes.find_syntax_by_extension(name))
-        .or_else(|| text.lines().next().and_then(|l| syntaxes.find_syntax_by_first_line(l)))?;
+    let assets = assets();
+    let theme = assets.themes.get(diff_theme);
+    let (syntaxes, syntax) = syntax_for_name(assets, name, text.lines().next())?;
 
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut lines = Vec::new();
@@ -183,29 +216,27 @@ pub fn highlight(
 /// Stateful per-line highlighter (for diff rendering, where old/new file
 /// contexts advance independently). Plain spans when no grammar matches.
 pub struct LineHighlighter {
-    inner: Option<HighlightLines<'static>>,
+    inner: Option<(HighlightLines<'static>, &'static SyntaxSet)>,
 }
 
 impl LineHighlighter {
     pub fn new(name: &str, diff_theme: DiffTheme) -> Self {
-        let (syntaxes, themes) = assets();
-        let theme = themes.get(diff_theme);
-        let ext = name.rsplit('.').next().unwrap_or("");
-        let syntax = syntaxes
-            .find_syntax_by_extension(ext)
-            .or_else(|| syntaxes.find_syntax_by_extension(name));
-        Self { inner: syntax.map(|s| HighlightLines::new(s, theme)) }
+        let assets = assets();
+        let theme = assets.themes.get(diff_theme);
+        Self {
+            inner: syntax_for_name(assets, name, None)
+                .map(|(syntaxes, syntax)| (HighlightLines::new(syntax, theme), syntaxes)),
+        }
     }
 
     /// Highlight one line (no trailing newline in, none out).
     pub fn line(&mut self, text: &str) -> Vec<Span<'static>> {
-        let Some(hl) = self.inner.as_mut() else {
+        let Some((hl, syntaxes)) = self.inner.as_mut() else {
             return vec![Span::raw(text.to_string())];
         };
         if text.len() > MAX_HIGHLIGHT_LINE_LEN {
             return vec![Span::raw(text.to_string())];
         }
-        let (syntaxes, _) = assets();
         let with_nl = format!("{text}\n");
         match hl.highlight_line(&with_nl, syntaxes) {
             Ok(regions) => regions
@@ -275,6 +306,57 @@ name = \"x\"
     }
 
     #[test]
+    fn go_zero_api_uses_embedded_syntax() {
+        let syntax = assets().go_zero.find_syntax_by_extension("api").unwrap();
+        assert_eq!(syntax.name, "go-zero API");
+
+        let source = "syntax = \"v1\"\n\
+type LoginReq {\n\
+    Username string `json:\"username\"`\n\
+}\n\
+@server (\n\
+    group: auth\n\
+)\n\
+service user-api {\n\
+    @handler Login\n\
+    post /login (LoginReq) returns (LoginResp)\n\
+}\n";
+        let lines = highlight("user.api", source, 20, DEFAULT_DIFF_THEME).unwrap();
+        assert_eq!(
+            lines
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            source.trim_end()
+        );
+
+        let service_line = &lines[7];
+        let keyword = service_line
+            .spans
+            .iter()
+            .find(|span| span.content == "service")
+            .unwrap();
+        let name = service_line
+            .spans
+            .iter()
+            .find(|span| span.content == "user-api")
+            .unwrap();
+        assert_ne!(keyword.style.fg, name.style.fg);
+        assert!(lines[8].spans.iter().any(|span| span.content == "@handler"));
+        assert!(lines[2].spans.iter().any(|span| span.content == "string"));
+
+        let mut line_highlighter = LineHighlighter::new("user.api", DEFAULT_DIFF_THEME);
+        let route = line_highlighter.line("post /login (LoginReq) returns (LoginResp)");
+        assert_eq!(
+            Line::from(route.clone()).to_string(),
+            "post /login (LoginReq) returns (LoginResp)"
+        );
+        assert!(route.iter().any(|span| span.content == "post"));
+        assert!(route.iter().any(|span| span.content == "/login"));
+    }
+
+    #[test]
     fn pathologically_long_lines_skip_highlighting_instead_of_hanging() {
         let long_line = format!("const x = \"{}\";\n", "a".repeat(MAX_HIGHLIGHT_LINE_LEN + 1));
         let lines = highlight("bundle.min.js", &long_line, 10, DEFAULT_DIFF_THEME)
@@ -300,8 +382,7 @@ name = \"x\"
 
     #[test]
     fn preview_highlights_use_the_selected_theme_colors() {
-        let (_, themes) = assets();
-        let settings = &themes.get(DEFAULT_DIFF_THEME).settings;
+        let settings = &assets().themes.get(DEFAULT_DIFF_THEME).settings;
         let highlights = preview_highlight_styles(DEFAULT_DIFF_THEME);
 
         assert_eq!(

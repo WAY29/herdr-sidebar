@@ -142,6 +142,8 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
 - **History drawers**: GRAPH, COMMITS, FILE HISTORY (follows renames), BRANCHES, REMOTES,
   STASHES, TAGS. Commits, branches, stashes, and tags expand into file trees whose leaves
   open the same structured, syntax-highlighted diff as live changes.
+- **Extended syntax highlighting** — Preview and structured diffs use two-face's bat grammar set,
+  plus an embedded go-zero API grammar for `.api` files.
 - **Auto-refreshing** — commits and edits made anywhere show up within seconds.
 
 ## Prefer two panels? Take two panels.

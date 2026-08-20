@@ -34,6 +34,7 @@ syntect = { version = "5", default-features = false, features = [
     "default-themes",
     "dump-load",
     "regex-fancy",
+    "yaml-load",
 ] }
 # bat's extended grammar set (TypeScript, TOML, Dockerfile, …) — syntect's
 # own defaults miss those.

@@ -690,7 +690,10 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
 - `syntect` with `regex-fancy` (pure Rust — the default oniguruma engine needs a C build
   that's pain on Windows). syntect's BUNDLED grammar set is Sublime's defaults and lacks
   TypeScript, TOML, Dockerfile and friends — `two-face` supplies bat's extended set
-  (`two_face::syntax::extra_newlines()`) and 32 embedded themes. Both Settings modals expose
+  (`two_face::syntax::extra_newlines()`) and 32 embedded themes. Sidebar additionally loads the
+  embedded `syntaxes/go-zero-api.sublime-syntax` grammar for go-zero `.api` files in a small
+  separate `SyntaxSet`, so adding one grammar does not rebuild two-face's full set during startup;
+  its tokens follow go-zero's official `ApiLexer.g4` / `ApiParser.g4`. Both Settings modals expose
   them as **Diff theme**: Enter/click opens a scrollable picker, Up/Down (plus g/G and
   PageUp/PageDown) navigates, and Enter/click applies the highlighted choice. The setting is
   persisted as `diff_theme` in `state.json`; the default is Catppuccin Mocha. An open in-process
