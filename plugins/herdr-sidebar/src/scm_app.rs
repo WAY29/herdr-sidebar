@@ -695,6 +695,8 @@ struct ClickZones {
     gear: Rect,
     /// The permanent hard-redraw button immediately left of Settings.
     redraw: Rect,
+    /// The main repository title row, excluding redraw and Settings.
+    repo_header: Rect,
     message: Rect,
     sparkle: Rect,
     button: Rect,
@@ -1724,6 +1726,11 @@ impl App {
                 TitleAction::ExpandAll => self.expand_all(),
                 _ => {}
             }
+            return None;
+        }
+        if !self.multi() && hits(z.repo_header, x, y) {
+            self.focus = Focus::List;
+            self.toggle_repo(0);
             return None;
         }
         if let Some((repo, action)) = self
@@ -3072,10 +3079,7 @@ impl App {
                 None => {}
             },
             Row::HistoryNotice => {}
-            Row::RepoHeader(r) => {
-                self.repos[r].collapsed = !self.repos[r].collapsed;
-                self.rebuild();
-            }
+            Row::RepoHeader(r) => self.toggle_repo(r),
             Row::StagedHeader(r) => {
                 self.repos[r].staged_collapsed = !self.repos[r].staged_collapsed;
                 self.rebuild();
@@ -3104,6 +3108,12 @@ impl App {
                 }
             }
         }
+    }
+
+    fn toggle_repo(&mut self, index: usize) {
+        let Some(repo) = self.repos.get_mut(index) else { return };
+        repo.collapsed = !repo.collapsed;
+        self.rebuild();
     }
 
     fn run_op(
@@ -3651,6 +3661,7 @@ impl App {
                 .saturating_sub(gear_w as u16 + redraw_w as u16),
             1,
         );
+        self.zones.repo_header = header_area;
         let header_hovered = title_actions_visible(self.last_mouse, self.mouse_pos, area);
         let (mut spans, zones) = hover_action_row(
             self.theme,
@@ -4963,6 +4974,32 @@ mod tests {
         assert_eq!(app.zones.sync.height, 1);
         assert!(app.rows.iter().any(|row| matches!(row, Row::ChangesHeader(_))));
         assert!(app.drawers[Drawer::Graph.index()].expanded);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn single_repo_title_click_toggles_that_repo() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-single-title-click-{}",
+            std::process::id()
+        ));
+        init_git_repo(&root);
+        let mut app = App::new_with_pane(root.clone(), None);
+        app.last_width = 60;
+        app.last_height = 24;
+        app.zones.repo_header = Rect::new(0, 2, 50, 1);
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click);
+        assert!(app.repos[0].collapsed);
+        app.on_mouse(click);
+        assert!(!app.repos[0].collapsed);
 
         let _ = std::fs::remove_dir_all(root);
     }

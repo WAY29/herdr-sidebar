@@ -121,6 +121,8 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
 - **Project headers keep actions reachable** — hover the current project's SCM header for
   Refresh and Collapse/Expand All. Long names truncate before the fixed action area; moving to
   another row hides it immediately, and the hovered repository header gets a full-row highlight.
+  With one repository, clicking the main title itself folds or opens that repository just like a
+  repository header in multi-repo mode.
 - **Clear commit controls** — Commit and optional Sync Changes use compact one-row color blocks;
   the message box, buttons, and Changes section sit together without extra layout or blank
   padding rows.

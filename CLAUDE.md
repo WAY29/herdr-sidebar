@@ -497,7 +497,9 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   actions show only while the last pane-local pointer position is on that specific header row:
   moving to another row hides them immediately, while leaving the pane falls back to
   `TITLE_ACTIONS_LINGER` (3s). SCM main and child repository headers also apply the normal
-  full-row hover background only while that row is hovered. Material theme uses the Nerd Font's bundled **codicons**
+  full-row hover background only while that row is hovered. In single-repo mode the main SCM
+  title row IS that repository's header: clicking its non-action area toggles `repo.collapsed`,
+  exactly like clicking a child repository header in multi-repo mode. Material theme uses the Nerd Font's bundled **codicons**
   (cod-new_file EA7F / cod-new_folder EA80 / cod-refresh EB37 / cod-collapse_all EAC5 /
   cod-expand_all EB95 —
   VS Code's own icons; verified in the CaskaydiaCove cmap). Chips are a plain ` X ` (one
