@@ -373,6 +373,7 @@ impl App {
         relative: &Path,
         is_dir: bool,
         line: Option<usize>,
+        diff: Option<&herdr_sidebar::open_mailbox::LinkDiff>,
     ) -> bool {
         let root = self.tree.root_path();
         let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
@@ -421,7 +422,7 @@ impl App {
             ctl.focus();
         }
         if !actual_is_dir {
-            self.open_preview_at(&target, line);
+            self.open_preview_at(&target, line, diff);
         }
         true
     }
@@ -454,17 +455,39 @@ impl App {
     /// visible): the shared viewer client reuses the tab's viewer pane or
     /// spawns one next to us.
     fn open_preview(&mut self, path: &Path) {
-        self.open_preview_at(path, None);
+        self.open_preview_at(path, None, None);
     }
 
-    fn open_preview_at(&mut self, path: &Path, line: Option<usize>) {
+    fn open_preview_at(
+        &mut self,
+        path: &Path,
+        line: Option<usize>,
+        diff: Option<&herdr_sidebar::open_mailbox::LinkDiff>,
+    ) {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|c| c.pane_id.clone()) else {
             self.notice = Some("preview needs a herdr pane".into());
             return;
         };
-        let payload = line.map_or_else(
-            || herdr_sidebar::viewer::file_request(path),
-            |line| herdr_sidebar::viewer::file_line_request(path, line),
+        let payload = diff.map_or_else(
+            || {
+                line.map_or_else(
+                    || herdr_sidebar::viewer::file_request(path),
+                    |line| herdr_sidebar::viewer::file_line_request(path, line),
+                )
+            },
+            |diff| {
+                line.map_or_else(
+                    || herdr_sidebar::viewer::diff_request(&diff.root, &diff.rel, &diff.kind),
+                    |line| {
+                        herdr_sidebar::viewer::diff_line_request(
+                            &diff.root,
+                            &diff.rel,
+                            &diff.kind,
+                            line,
+                        )
+                    },
+                )
+            },
         );
         if let Err(e) = herdr_sidebar::viewer::open_in_pane(
             &pane_id,

@@ -261,6 +261,12 @@ comments exist. Comments are removed after a successful copy/send, or per file w
 never written to the source file.
 Selection, saved-comment, and tooltip accent colors follow the active Diff Theme.
 
+File hyperlinks handled by the patched Herdr host open changed files in Source Control: the
+owning repository and Staged/Changes tree are expanded, the file row is selected, and Preview
+shows its structured diff. Worktree/untracked changes take priority over staged-only changes. A
+linked changed line is centered and highlighted when visible in the diff; clean files still open
+and select normally in Explorer.
+
 | Search | What it does |
 |---|---|
 | Type in query/filter fields | search automatically after 250 ms |

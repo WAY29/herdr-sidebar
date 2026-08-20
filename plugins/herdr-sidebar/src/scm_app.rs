@@ -1244,6 +1244,66 @@ impl App {
         self.rebuild();
     }
 
+    pub fn reveal_link_diff(
+        &mut self,
+        diff: &herdr_sidebar::open_mailbox::LinkDiff,
+        line: Option<usize>,
+    ) -> bool {
+        self.refresh();
+        let Some(repo_index) = self.repos.iter().position(|repo| repo.git.root() == diff.root)
+        else {
+            return false;
+        };
+        let staged = match diff.kind.as_str() {
+            "staged" => true,
+            "worktree" | "untracked" => false,
+            _ => return false,
+        };
+        let Some(entry) = (if staged {
+            &self.repos[repo_index].status.staged
+        } else {
+            &self.repos[repo_index].status.unstaged
+        })
+        .iter()
+        .find(|entry| entry.path == diff.rel)
+        .cloned()
+        else {
+            return false;
+        };
+
+        let repo = &mut self.repos[repo_index];
+        repo.collapsed = false;
+        if staged {
+            repo.staged_collapsed = false;
+            toggle_collapsed_path(&mut repo.staged_dirs, &diff.rel, false);
+        } else {
+            repo.changes_collapsed = false;
+            toggle_collapsed_path(&mut repo.changes_dirs, &diff.rel, false);
+        }
+        repo.rebuild_file_rows(self.sidebar_state.scm_file_view);
+        self.active = repo_index;
+        self.focus = Focus::List;
+        self.rebuild();
+
+        let anchor = if staged {
+            ScmAnchor::Staged {
+                repo: diff.root.clone(),
+                path: diff.rel.clone(),
+            }
+        } else {
+            ScmAnchor::Changes {
+                repo: diff.root.clone(),
+                path: diff.rel.clone(),
+            }
+        };
+        let Some(index) = self.find_anchor(&anchor) else {
+            return false;
+        };
+        self.select(index);
+        self.open_diff_at(repo_index, &entry, staged, line);
+        true
+    }
+
     /// Re-stamp the identity tokens so launchers know this pane is alive.
     pub fn heartbeat(&mut self) {
         if self.last_beat.elapsed() < std::time::Duration::from_secs(5) {
@@ -2868,6 +2928,16 @@ impl App {
     /// Show a file's diff in the preview pane beside the sidebar. Staged
     /// rows show the staged diff; untracked files render as one addition.
     fn open_diff(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
+        self.open_diff_at(repo, entry, staged, None);
+    }
+
+    fn open_diff_at(
+        &mut self,
+        repo: usize,
+        entry: &FileEntry,
+        staged: bool,
+        line: Option<usize>,
+    ) {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|c| c.pane_id.clone()) else {
             self.flash = Some(("diff preview needs a herdr pane".into(), true));
             return;
@@ -2880,8 +2950,17 @@ impl App {
         } else {
             "worktree"
         };
-        let payload =
-            herdr_sidebar::viewer::diff_request(repo.git.root(), &entry.path, kind);
+        let payload = line.map_or_else(
+            || herdr_sidebar::viewer::diff_request(repo.git.root(), &entry.path, kind),
+            |line| {
+                herdr_sidebar::viewer::diff_line_request(
+                    repo.git.root(),
+                    &entry.path,
+                    kind,
+                    line,
+                )
+            },
+        );
         if let Err(e) =
             herdr_sidebar::viewer::open_in_pane(&pane_id, repo.git.root(), &payload)
         {

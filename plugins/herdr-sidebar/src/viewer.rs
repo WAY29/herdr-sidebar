@@ -115,6 +115,8 @@ enum Request {
         rel: String,
         /// "staged" | "worktree" | "untracked" — which diff to run.
         kind: String,
+        /// Current-file line requested by a hyperlink, when present.
+        line: Option<usize>,
     },
     RefDiff {
         root: PathBuf,
@@ -168,6 +170,11 @@ pub fn diff_request(root: &Path, rel: &str, kind: &str) -> String {
     format!("diff\t{}\t{rel}\t{kind}", root.display())
 }
 
+/// Control-file payload for a git diff anchored to one current-file line.
+pub fn diff_line_request(root: &Path, rel: &str, kind: &str, line: usize) -> String {
+    format!("diff\t{}\t{rel}\t{kind}\t{line}", root.display())
+}
+
 /// Immutable structured diff between two revisions for one historical file.
 pub fn ref_diff_request(
     root: &Path,
@@ -200,7 +207,8 @@ fn parse_request(raw: &str) -> Option<Request> {
             let root = PathBuf::from(parts.next()?);
             let rel = parts.next()?.to_string();
             let kind = parts.next().unwrap_or("worktree").to_string();
-            Some(Request::Diff { root, rel, kind })
+            let line = parts.next().and_then(|line| line.parse().ok());
+            Some(Request::Diff { root, rel, kind, line })
         }
         Some("show") => {
             let root = PathBuf::from(parts.next()?);
@@ -908,6 +916,20 @@ impl Doc {
             highlight.then(|| (row, Instant::now() + SOURCE_LINE_HIGHLIGHT));
     }
 
+    fn request_diff_line(&mut self, line: usize, highlight: bool) -> bool {
+        let Some(row) = self.sources.iter().position(|source| {
+            source.as_ref().is_some_and(|source| {
+                matches!(source.kind, SourceKind::Diff { new_line: Some(found), .. } if found == line)
+            })
+        }) else {
+            return false;
+        };
+        self.center_source_row_pending = Some(row);
+        self.highlighted_source_row =
+            highlight.then(|| (row, Instant::now() + SOURCE_LINE_HIGHLIGHT));
+        true
+    }
+
     fn apply_source_line_center(&mut self, height: u16) {
         let Some(source_row) = self.center_source_row_pending.take() else {
             return;
@@ -1101,7 +1123,7 @@ fn load(
         Request::SearchFile { path, line, query, regex, case_sensitive, whole_word } => {
             load_search_file(path, *line, query, *regex, *case_sensitive, *whole_word, diff_theme)
         }
-        Request::Diff { root, rel, kind } => {
+        Request::Diff { root, rel, kind, .. } => {
             load_diff(root, rel, kind, diff_theme, hide_unmodified, expanded_folds)
         }
         Request::RefDiff { root, old_spec, new_spec, rel, old_rel } => load_ref_diff(
@@ -1121,6 +1143,11 @@ fn prepare_new_request(doc: &mut Doc, request: &Request, hide_unmodified: bool) 
     match request {
         Request::FileLine { line, .. } => doc.request_source_line(*line, true),
         Request::SearchFile { line, .. } => doc.request_source_line(*line, false),
+        Request::Diff { line: Some(line), .. } => {
+            if !doc.request_diff_line(*line, true) {
+                doc.request_first_change_center();
+            }
+        }
         Request::Diff { .. } | Request::RefDiff { .. } if !hide_unmodified => {
             doc.request_first_change_center();
         }
@@ -3654,7 +3681,18 @@ mod tests {
             Some(Request::Diff {
                 root: PathBuf::from("C:/repo"),
                 rel: "src/a.rs".into(),
-                kind: "staged".into()
+                kind: "staged".into(),
+                line: None,
+            })
+        );
+        let d = diff_line_request(Path::new("C:/repo"), "src/a.rs", "worktree", 42);
+        assert_eq!(
+            parse_request(&d),
+            Some(Request::Diff {
+                root: PathBuf::from("C:/repo"),
+                rel: "src/a.rs".into(),
+                kind: "worktree".into(),
+                line: Some(42),
             })
         );
         let d = ref_diff_request(
@@ -3708,6 +3746,39 @@ mod tests {
         assert_eq!(doc.lines[41].to_string(), "line 42");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diff_line_anchor_uses_the_current_file_line() {
+        let sources = vec![
+            Some(SelectableRow::diff(crate::diffview::DiffSource {
+                text: "old".into(),
+                old_line: Some(41),
+                new_line: None,
+                kind: crate::diffview::DiffSourceKind::Deleted,
+            })),
+            Some(SelectableRow::diff(crate::diffview::DiffSource {
+                text: "new".into(),
+                old_line: None,
+                new_line: Some(42),
+                kind: crate::diffview::DiffSourceKind::Added,
+            })),
+        ];
+        let mut doc = Doc::new(
+            "a.rs".into(),
+            "diff".into(),
+            vec![Line::raw("old"), Line::raw("new")],
+            false,
+            vec![None, None],
+        )
+        .with_sources(sources);
+
+        assert!(doc.request_diff_line(42, true));
+        doc.apply_source_line_center(1);
+
+        assert_eq!(doc.scroll, 1);
+        assert_eq!(doc.active_source_highlight(), Some(1));
+        assert!(!doc.request_diff_line(41, true), "deleted-side lines are not current-file anchors");
     }
 
     #[test]

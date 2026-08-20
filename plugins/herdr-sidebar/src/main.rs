@@ -201,6 +201,10 @@ fn run_explorer(
     }
     loop {
         configure_sync(sync, &app.root(), app.workspace_sync_enabled());
+        if sync.is_some() && quick_open.peek().is_some_and(|request| request.diff.is_some()) {
+            switch_to_open_request_view(sync, app.workspace_width(), View::SourceControl);
+            return Ok(Exit::Switch);
+        }
         preview.sync();
         if let Some(request) = quick_open.take() {
             if request.is_dir {
@@ -211,6 +215,7 @@ fn run_explorer(
                 &request.path,
                 request.is_dir,
                 request.line,
+                request.diff.as_ref(),
             )
                 && let Some(session) = sync.as_mut()
             {
@@ -391,9 +396,28 @@ fn run_scm(
     }
     loop {
         configure_sync(sync, &app.root(), app.workspace_sync_enabled());
-        if quick_open.poll() {
-            switch_to_quick_open_explorer(sync, app.workspace_width());
+        if quick_open.peek().is_some_and(|request| request.diff.is_none()) {
+            switch_to_open_request_view(sync, app.workspace_width(), View::Explorer);
             return Ok(Exit::Switch);
+        }
+        if let Some(mut request) = quick_open.take()
+            && let Some(diff) = request.diff.as_ref()
+        {
+            if app.reveal_link_diff(diff, request.line) {
+                if let Some(session) = sync.as_mut() {
+                    session.set_root(&app.root());
+                    session.publish_scm(
+                        View::SourceControl,
+                        app.workspace_width(),
+                        app.workspace_state(),
+                    );
+                }
+            } else {
+                request.diff = None;
+                quick_open.put_back(request);
+                switch_to_open_request_view(sync, app.workspace_width(), View::Explorer);
+                return Ok(Exit::Switch);
+            }
         }
         if let Some(session) = sync.as_mut() {
             session.set_unified(app.workspace_sync_enabled());
@@ -565,8 +589,13 @@ fn run_search(
     }
     loop {
         configure_sync(sync, &app.root(), app.workspace_sync_enabled());
-        if quick_open.poll() {
-            switch_to_quick_open_explorer(sync, app.workspace_width());
+        if let Some(request) = quick_open.peek() {
+            let view = if request.diff.is_some() {
+                View::SourceControl
+            } else {
+                View::Explorer
+            };
+            switch_to_open_request_view(sync, app.workspace_width(), view);
             return Ok(Exit::Switch);
         }
         if let Some(session) = sync.as_mut() {
@@ -729,11 +758,11 @@ fn configure_sync(sync: &mut Option<SyncSession>, root: &std::path::Path, enable
     }
 }
 
-fn switch_to_quick_open_explorer(sync: &mut Option<SyncSession>, width: u16) {
+fn switch_to_open_request_view(sync: &mut Option<SyncSession>, width: u16, view: View) {
     let mut sidebar_state = state::load_state();
-    sidebar_state.active = View::Explorer;
+    sidebar_state.active = view;
     state::save_state(sidebar_state);
     if let Some(session) = sync.as_mut() {
-        session.publish_active(View::Explorer, width);
+        session.publish_active(view, width);
     }
 }

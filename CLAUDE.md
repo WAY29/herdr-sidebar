@@ -234,10 +234,16 @@ herdr's pane menu. Same-tab `pane.move` is a deliberate no-op
   Markdown links, launches its windowless ensure sidecar, opens a hidden Sidebar if needed, then
   switches to Explorer, expands/selects the file, and opens the in-process Preview. Source-line
   anchors accept `#L42` / `?line=42` and absolute path suffixes `:42` / `:42:column`; anchored
-  Markdown bypasses `glow` so displayed line numbers still match the source. The requested source
-  line is centered from the actual Viewer body height on its first draw and receives a full-row
-  selection background for three seconds. Links outside the current Explorer root fall back to
-  the OS default app instead of silently re-rooting Sidebar.
+  Markdown bypasses `glow` so displayed line numbers still match the source. Hyperlink requests
+  (but not Quick Open or ordinary Explorer activation) first discover the file's owning Git repo:
+  an unstaged/worktree or untracked diff wins over a staged-only diff. Changed targets switch to
+  Source Control, expand the owning repo/section and only the target path's collapsed ancestors,
+  select its Staged/Changes row, and open the structured diff; clean targets retain the Explorer
+  source-preview path. An anchored changed line is centered and highlighted when present in the
+  rendered diff; a folded/nonexistent target falls back to the first change without expanding
+  folds. Normal source targets are centered from the actual Viewer body height on first draw and
+  receive a full-row selection background for three seconds. Links outside the current Explorer
+  root fall back to the OS default app instead of silently re-rooting Sidebar.
   This integration requires the patched host; stock Herdr 0.8 still drops `file://` before plugin
   dispatch. Outer Kitty `open-actions.conf` remains unsuitable because it lacks Herdr's inner
   pane/tab/session context.

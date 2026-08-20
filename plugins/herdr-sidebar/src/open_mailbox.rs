@@ -11,6 +11,15 @@ pub struct OpenRequest {
     pub is_dir: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<LinkDiff>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LinkDiff {
+    pub root: PathBuf,
+    pub rel: String,
+    pub kind: String,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +65,15 @@ impl Inbox {
     pub fn take(&mut self) -> Option<OpenRequest> {
         self.poll();
         self.pending.take()
+    }
+
+    pub fn peek(&mut self) -> Option<&OpenRequest> {
+        self.poll();
+        self.pending.as_ref()
+    }
+
+    pub fn put_back(&mut self, request: OpenRequest) {
+        self.pending = Some(request);
     }
 }
 
@@ -159,11 +177,22 @@ pub fn send_request(
     is_dir: bool,
     line: Option<usize>,
 ) -> Result<(), String> {
+    send_request_inner(target, path, is_dir, line, None)
+}
+
+fn send_request_inner(
+    target: &Target,
+    path: &Path,
+    is_dir: bool,
+    line: Option<usize>,
+    diff: Option<LinkDiff>,
+) -> Result<(), String> {
     let request = OpenRequest {
         root: target.root.clone(),
         path: path.to_path_buf(),
         is_dir,
         line,
+        diff,
     };
     let path = request_path(&target.pane_id)
         .ok_or_else(|| "Could not resolve the Sidebar state directory.".to_string())?;
@@ -206,16 +235,39 @@ fn open_clicked_link_inner() -> Result<(), String> {
             && !relative.as_os_str().is_empty()
         {
             let is_dir = path.is_dir();
-            return send_request(
+            let diff = (!is_dir).then(|| link_diff(&path)).flatten();
+            return send_request_inner(
                 &target,
                 relative,
                 is_dir,
                 if is_dir { None } else { link.line },
+                diff,
             );
         }
     }
 
     actions::open_external(&path).map_err(|error| error.to_string())
+}
+
+fn link_diff(path: &Path) -> Option<LinkDiff> {
+    let git = crate::git::Git::discover(path.parent()?).ok()?;
+    let relative = path.strip_prefix(git.root()).ok()?;
+    let rel = relative.to_string_lossy().replace('\\', "/");
+    let status = git.status().ok()?;
+    let kind = preferred_diff_kind(&status, &rel)?;
+    Some(LinkDiff {
+        root: git.root().to_path_buf(),
+        rel,
+        kind: kind.into(),
+    })
+}
+
+fn preferred_diff_kind(status: &crate::git::Status, rel: &str) -> Option<&'static str> {
+    if let Some(entry) = status.unstaged.iter().find(|entry| entry.path == rel) {
+        Some(if entry.letter == 'U' { "untracked" } else { "worktree" })
+    } else {
+        status.staged.iter().any(|entry| entry.path == rel).then_some("staged")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -409,6 +461,30 @@ mod tests {
             serde_json::from_str(r#"{"root":"/repo","path":"src/main.rs","is_dir":false}"#)
                 .unwrap();
         assert_eq!(request.line, None);
+        assert!(request.diff.is_none());
+    }
+
+    fn status_entry(path: &str, letter: char) -> crate::git::FileEntry {
+        crate::git::FileEntry {
+            path: path.into(),
+            orig: None,
+            letter,
+            stat: crate::git::DiffStat::default(),
+        }
+    }
+
+    #[test]
+    fn hyperlink_diff_prefers_worktree_then_untracked_then_staged() {
+        let mut status = crate::git::Status::default();
+        status.staged.push(status_entry("both.rs", 'M'));
+        status.unstaged.push(status_entry("both.rs", 'M'));
+        status.unstaged.push(status_entry("new.rs", 'U'));
+        status.staged.push(status_entry("staged.rs", 'A'));
+
+        assert_eq!(preferred_diff_kind(&status, "both.rs"), Some("worktree"));
+        assert_eq!(preferred_diff_kind(&status, "new.rs"), Some("untracked"));
+        assert_eq!(preferred_diff_kind(&status, "staged.rs"), Some("staged"));
+        assert_eq!(preferred_diff_kind(&status, "clean.rs"), None);
     }
 
     #[test]
