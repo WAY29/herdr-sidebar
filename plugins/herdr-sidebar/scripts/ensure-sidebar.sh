@@ -84,4 +84,10 @@ fi
 if [ "$target" = "$fid" ]; then
   "$herdr_bin" pane focus --direction right --pane "$np" >/dev/null 2>&1 || true
 fi
+
+# Keep the shared launch lock until the TUI stamps its first heartbeat token.
+# Releasing it while the fresh pane has only its manifest label lets the focus
+# events above run another ensure, misclassify that pane as a resumed corpse,
+# and enter an open -> REPLACE loop.
+sleep 3
 exit 0

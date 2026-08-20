@@ -288,6 +288,8 @@ Selection, saved-comment, and tooltip accent colors follow the active Diff Theme
 - Runtime pane control uses **herdr's socket API directly**. Unix launchers open manifest
   entrypoints without exposing shell commands; Windows focus hooks use a windowless
   GUI-subsystem sidecar so nothing flashes a console window.
+- Unix focus hooks keep their launch lock through the new pane's first heartbeat, so the
+  focus-event burst from docking cannot mistake that fresh Sidebar for a restored dead pane.
 - The left dock survives real layouts — split-the-leftmost + swap, full-height repair,
   ratio-aware resizing — all unit-tested against herdr's actual JSON.
 - Windows quirks (exe locking, PowerShell 5.1 BOMs, double-width Nerd Font glyphs) are

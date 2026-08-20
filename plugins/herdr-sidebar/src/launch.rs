@@ -68,9 +68,9 @@ impl Pane {
     /// this happens: herdr resumes a restarted server's panes with their
     /// labels and scrollback, but the process inside is a fresh shell and
     /// metadata tokens do not survive. (A launcher does rename a pane
-    /// moments before the TUI stamps its first token, so this can race a
-    /// fresh spawn for ~a second — REPLACE just respawns, and the next pass
-    /// sees a live token, so the race self-heals.)
+    /// moments before the TUI stamps its first token, so launchers must hold
+    /// the shared ensure lock through that first heartbeat. Otherwise each
+    /// replacement emits another focus event and the race loops forever.)
     fn our_label_without_token(&self) -> bool {
         !self.is_agent()
             && matches!(self.label.as_deref(), Some("Sidebar" | "Explorer"))
