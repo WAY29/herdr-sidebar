@@ -318,6 +318,7 @@ fn run_explorer(
                     None
                 }
                 Event::FocusLost => {
+                    app.on_focus_lost();
                     preview.on_focus_lost();
                     None
                 }

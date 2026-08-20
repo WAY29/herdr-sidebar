@@ -30,7 +30,7 @@ use herdr_sidebar::state::Exit;
 use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
     TitleAction, activity_button_style, activity_icons, branch_icon, draw_option_picker,
-    draw_scrollbar, gear_icon, hits, hits_collapse_button, icon_button_style,
+    draw_hover_tooltip, draw_scrollbar, gear_icon, hits, hits_collapse_button, icon_button_style,
     hover_action_row, mouse_linger_active, option_picker_index, redraw_button, sibling_panes_of,
     sparkle_icon, title_actions_visible, truncate_to, within, wrap_footer_message, wrap_hints,
 };
@@ -69,7 +69,7 @@ fn letter_color(letter: char) -> Color {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Focus {
     Message,
     Commit,
@@ -4118,7 +4118,14 @@ impl App {
             && let Some(tooltip) = self.hovered_change_tooltip()
         {
             let anchor_x = self.mouse_pos.map_or(area.x, |(x, _)| x);
-            draw_hover_tooltip(frame, area, row_y, anchor_x, tooltip);
+            draw_hover_tooltip(
+                frame,
+                area,
+                row_y,
+                anchor_x,
+                &tooltip.path,
+                diff_stat_spans(tooltip.stat),
+            );
         }
 
         // Terminal cursor inside the focused INLINE message box (multi-repo).
@@ -4591,58 +4598,6 @@ fn change_tree_tooltip<'a>(
             })
         }
     }
-}
-
-fn draw_hover_tooltip(
-    frame: &mut Frame,
-    bounds: Rect,
-    row_y: u16,
-    anchor_x: u16,
-    tooltip: ChangeTooltip,
-) {
-    if bounds.width < 14 || bounds.height < 3 {
-        return;
-    }
-    let stats = diff_stat_spans(tooltip.stat);
-    let stats_width = stats.iter().map(Span::width).sum::<usize>();
-    let width = (Span::raw(tooltip.path.as_str()).width().max(stats_width) + 4)
-        .clamp(14, bounds.width as usize) as u16;
-    let mut lines: Vec<Line<'static>> =
-        wrap_footer_message(&tooltip.path, width.saturating_sub(2), 0)
-        .into_iter()
-        .map(Line::from)
-        .collect();
-    let stat_line = if stats.is_empty() {
-        None
-    } else {
-        let mut line = vec![Span::raw(" ")];
-        line.extend(stats);
-        Some(Line::from(line))
-    };
-    let max_lines = bounds.height.saturating_sub(2) as usize;
-    lines.truncate(max_lines.saturating_sub(usize::from(stat_line.is_some())));
-    lines.extend(stat_line);
-    let height = (lines.len() + 2) as u16;
-
-    let right = bounds.x.saturating_add(bounds.width);
-    let bottom = bounds.y.saturating_add(bounds.height);
-    let x = anchor_x
-        .saturating_sub(1)
-        .clamp(bounds.x, right.saturating_sub(width));
-    let below = row_y.saturating_add(1);
-    let y = if below.saturating_add(height) <= bottom {
-        below
-    } else {
-        row_y.saturating_sub(height).max(bounds.y)
-    };
-    let area = Rect::new(x, y, width, height);
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(Color::Rgb(0x25, 0x25, 0x26)).fg(Color::White))
-            .block(Block::bordered().border_style(Style::default().fg(Color::DarkGray))),
-        area,
-    );
 }
 
 fn change_tree_item(

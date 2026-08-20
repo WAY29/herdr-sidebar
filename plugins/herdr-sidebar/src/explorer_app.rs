@@ -17,10 +17,10 @@ use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::syntax;
 use herdr_sidebar::ui::{
-    TitleAction, activity_button_style, activity_icons, draw_option_picker, draw_scrollbar,
-    gear_icon, hits, hits_collapse_button, hover_action_row, icon_button_style, input_tail,
-    option_picker_index, redraw_button, sibling_panes_of, title_actions_visible, truncate_to,
-    wrap_footer_message, wrap_hints,
+    TitleAction, activity_button_style, activity_icons, draw_hover_tooltip, draw_option_picker,
+    draw_scrollbar, gear_icon, hits, hits_collapse_button, hover_action_row, icon_button_style,
+    input_tail, mouse_linger_active, option_picker_index, redraw_button, sibling_panes_of,
+    title_actions_visible, truncate_to, wrap_footer_message, wrap_hints,
 };
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::workspace_sync::ExplorerState;
@@ -207,7 +207,7 @@ pub struct App {
     /// while they are hidden).
     title_zones: Vec<(Rect, TitleAction)>,
     /// When the mouse last moved/clicked/scrolled over this pane — the leave
-    /// fallback for a pointer last seen on the title row (see
+    /// fallback for a pointer last seen on a title or tree row (see
     /// [`herdr_sidebar::ui::TITLE_ACTIONS_LINGER`]).
     last_mouse: Option<std::time::Instant>,
     /// Last known mouse position, for the button hover highlight.
@@ -660,6 +660,13 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    pub fn on_focus_lost(&mut self) {
+        self.hovered = None;
+        self.mouse_pos = None;
+        self.last_mouse = None;
+        self.title_zones.clear();
     }
 
     /// `Some(exit)` ends the event loop, mirroring on_key.
@@ -1438,6 +1445,19 @@ impl App {
         row_index_at(self.body, self.rows.len(), mouse_row)
     }
 
+    fn row_y(&self, index: usize) -> Option<u16> {
+        let visible = u16::try_from(index.checked_sub(self.body.offset)?).ok()?;
+        (visible < self.body.height).then(|| self.body.top.saturating_add(visible))
+    }
+
+    fn hovered_path_tooltip(&self) -> Option<String> {
+        if !mouse_linger_active(self.last_mouse) {
+            return None;
+        }
+        let row = self.rows.get(self.hovered?)?;
+        Some(explorer_tooltip_path(&self.tree.root_path(), &row.path))
+    }
+
     fn selected_row(&self) -> Option<&Row> {
         self.rows.get(self.selected?)
     }
@@ -1578,25 +1598,35 @@ impl App {
         }
         self.draw_header(frame, header);
 
+        let h = (body.height as usize).max(1);
+        self.scroll = self.scroll.min(self.rows.len().saturating_sub(h));
+        if self.snap {
+            if let Some(sel) = self.selected {
+                if sel < self.scroll {
+                    self.scroll = sel;
+                } else if sel >= self.scroll + h {
+                    self.scroll = sel + 1 - h;
+                }
+            }
+            self.snap = false;
+        }
+        self.body = BodyGeom {
+            left: body.x,
+            top: body.y,
+            width: list_content_width(body.width, self.rows.len(), h),
+            height: body.height,
+            offset: self.scroll,
+        };
+        // Scrolling changes the row under a stationary pointer without a new
+        // Moved event, so derive hover from the current viewport every frame.
+        self.hovered = self.mouse_pos.and_then(|(_, row)| self.row_at(row));
+
         if self.rows.is_empty() {
             frame.render_widget(Paragraph::new("  (empty)".dim().italic()), body);
         } else {
-            let h = (body.height as usize).max(1);
-            self.scroll = self.scroll.min(self.rows.len().saturating_sub(h));
-            if self.snap {
-                if let Some(sel) = self.selected {
-                    if sel < self.scroll {
-                        self.scroll = sel;
-                    } else if sel >= self.scroll + h {
-                        self.scroll = sel + 1 - h;
-                    }
-                }
-                self.snap = false;
-            }
             let theme = self.theme;
             let hovered = self.hovered;
             let selected = self.selected;
-            let content_width = list_content_width(body.width, self.rows.len(), h);
             let items: Vec<ListItem> = self
                 .rows
                 .iter()
@@ -1609,20 +1639,21 @@ impl App {
                         theme,
                         hovered == Some(i),
                         selected == Some(i),
-                        content_width as usize,
+                        self.body.width as usize,
                     )
                 })
                 .collect();
             frame.render_widget(List::new(items), body);
             draw_scrollbar(frame, body, self.rows.len(), h, self.scroll);
+            if self.overlay.is_none()
+                && let Some(index) = hovered
+                && let Some(row_y) = self.row_y(index)
+                && let Some(path) = self.hovered_path_tooltip()
+            {
+                let anchor_x = self.mouse_pos.map_or(body.x, |(x, _)| x);
+                draw_hover_tooltip(frame, body, row_y, anchor_x, &path, Vec::new());
+            }
         }
-        self.body = BodyGeom {
-            left: body.x,
-            top: body.y,
-            width: list_content_width(body.width, self.rows.len(), (body.height as usize).max(1)),
-            height: body.height,
-            offset: self.scroll,
-        };
 
         // Collapse button at the bottom-right of the LAST footer line,
         // mirroring herdr's own sidebar. hits_collapse_button targets the
@@ -2049,6 +2080,10 @@ fn list_content_width(width: u16, total: usize, visible: usize) -> u16 {
     width.saturating_sub(u16::from(total > visible))
 }
 
+fn explorer_tooltip_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).display().to_string()
+}
+
 /// The row index at a pane-local mouse row given the last-drawn body
 /// geometry, if it lands on an actual row.
 fn row_index_at(body: BodyGeom, row_count: usize, mouse_row: u16) -> Option<usize> {
@@ -2128,6 +2163,22 @@ mod tests {
         assert_eq!(row_index_at(body, 100, 10), Some(14));
         assert_eq!(row_index_at(body, 100, 11), None, "footer row");
         assert_eq!(row_index_at(body, 6, 2), None, "past the last row");
+    }
+
+    #[test]
+    fn tooltip_path_is_relative_to_the_explorer_root() {
+        let root = PathBuf::from("workspace");
+        let relative = PathBuf::from("src").join("lib.rs");
+        assert_eq!(
+            explorer_tooltip_path(&root, &root.join(&relative)),
+            relative.display().to_string()
+        );
+
+        let outside = PathBuf::from("other").join("README.md");
+        assert_eq!(
+            explorer_tooltip_path(&root, &outside),
+            outside.display().to_string()
+        );
     }
 
     #[test]

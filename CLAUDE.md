@@ -484,7 +484,12 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   relying on List clipping lets a final wide glyph occupy and visually erase the scrollbar cell.
   Explorer file/folder rows reserve their `⋯` menu cell even while hidden. SCM file-tree
   rows instead use that width for longer names until hovered, then truncate the name and
-  restore the fixed right-edge menu/action/status hit zones.
+  restore the fixed right-edge menu/action/status hit zones. Explorer file/folder hover uses
+  the same anchored `ui::draw_hover_tooltip` geometry and three-second mouse linger as SCM, but
+  shows only the row's full path relative to the Explorer root; the tooltip must not alter row
+  text, width, menu slots, or hitboxes. Re-hit-test the saved mouse coordinate against the current Explorer viewport on
+  every draw so scrolling under a stationary pointer updates both row hover and tooltip, and
+  clear the hover state on FocusLost.
 - **Search-result highlight ranges are BYTE offsets, not display widths**: `rg --json`
   submatches report UTF-8 byte spans into the line text. When the UI clips a long result
   line and prefixes it with `…`, shift the saved match spans by the ellipsis' UTF-8 byte

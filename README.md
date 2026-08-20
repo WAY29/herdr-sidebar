@@ -62,8 +62,9 @@ A real tree, not a directory dump:
   the file. Saved ranges stay highlighted in Preview and reveal their temporary Comment in a
   tooltip on hover. Tabs, Unicode width, diff gutters, and wrapped rows stay mapped to the source
   text.
-- **Double-click folders** to fold, hover highlights, mouse wheel, and a hover **⋯ menu button**:
-  New File, New Folder, Open with Default App (files
+- **Double-click folders** to fold, hover highlights, mouse wheel, a full root-relative path
+  tooltip for every file and folder, and a hover **⋯ menu button**: New File, New Folder,
+  Open with Default App (files
   only — hands the file to the OS-associated app, like a double click in the file
   manager), Rename, Delete, Copy Path / Relative Path, Reveal in File Explorer.
 - Dotfiles toggle, live refresh, and `b` / the bottom-right `«` button to hide the Sidebar for

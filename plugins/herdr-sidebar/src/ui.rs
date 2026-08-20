@@ -243,6 +243,69 @@ pub fn mouse_linger_active(last_mouse: Option<std::time::Instant>) -> bool {
     last_mouse.is_some_and(|at| at.elapsed() < TITLE_ACTIONS_LINGER)
 }
 
+/// Draw hover details beside a list row without changing that row's layout.
+/// The optional footer spans let SCM append diff statistics while Explorer
+/// uses the same placement for a path-only tooltip.
+pub fn draw_hover_tooltip(
+    frame: &mut Frame,
+    bounds: Rect,
+    row_y: u16,
+    anchor_x: u16,
+    text: &str,
+    footer: Vec<Span<'static>>,
+) {
+    if bounds.width < 14 || bounds.height < 3 {
+        return;
+    }
+    let footer_width = footer.iter().map(Span::width).sum::<usize>();
+    let width = (Span::raw(text).width().max(footer_width) + 4)
+        .clamp(14, bounds.width as usize) as u16;
+    let mut lines: Vec<Line<'static>> = wrap_footer_message(text, width.saturating_sub(2), 0)
+        .into_iter()
+        .map(Line::from)
+        .collect();
+    let footer = if footer.is_empty() {
+        None
+    } else {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(footer);
+        Some(Line::from(spans))
+    };
+    let max_lines = bounds.height.saturating_sub(2) as usize;
+    lines.truncate(max_lines.saturating_sub(usize::from(footer.is_some())));
+    lines.extend(footer);
+    let area = hover_tooltip_rect(bounds, row_y, anchor_x, width, (lines.len() + 2) as u16);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(Color::Rgb(0x25, 0x25, 0x26)).fg(Color::White))
+            .block(Block::bordered().border_style(Style::default().fg(Color::DarkGray))),
+        area,
+    );
+}
+
+fn hover_tooltip_rect(
+    bounds: Rect,
+    row_y: u16,
+    anchor_x: u16,
+    width: u16,
+    height: u16,
+) -> Rect {
+    let right = bounds.x.saturating_add(bounds.width);
+    let bottom = bounds.y.saturating_add(bounds.height);
+    let x = anchor_x
+        .saturating_sub(1)
+        .clamp(bounds.x, right.saturating_sub(width));
+    let below = row_y.saturating_add(1);
+    let y = if below.saturating_add(height) <= bottom {
+        below
+    } else {
+        row_y.saturating_sub(height).max(bounds.y)
+    };
+    Rect::new(x, y, width, height)
+}
+
 /// Title actions appear only while the pointer is on that title row. The
 /// linger covers leaving the pane, where terminals provide no final motion.
 pub fn title_actions_visible(
@@ -514,6 +577,21 @@ mod tests {
         assert_eq!(activity_button_style(false, false).bg, None);
         assert_eq!(activity_button_style(false, true).bg, Some(KEYCAP_BG));
         assert_eq!(activity_button_style(true, false).bg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn hover_tooltip_is_clamped_and_moves_above_bottom_rows() {
+        let bounds = Rect::new(10, 5, 30, 10);
+        assert_eq!(
+            hover_tooltip_rect(bounds, 7, 40, 14, 3),
+            Rect::new(26, 8, 14, 3),
+            "right-edge anchors stay inside the list and prefer below"
+        );
+        assert_eq!(
+            hover_tooltip_rect(bounds, 14, 10, 14, 3),
+            Rect::new(10, 11, 14, 3),
+            "the last visible row places the tooltip above"
+        );
     }
 
     #[test]
