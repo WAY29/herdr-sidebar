@@ -57,6 +57,12 @@ A real tree, not a directory dump:
 - **Click a file and it opens** across every column beside the sidebar. Existing panes
   stay untouched behind the preview; Esc reveals them exactly as they were. Line numbers,
   scrolling, and binary files are handled, and clicking another file updates in place.
+- **Preview static images in place** for PNG, JPEG, WebP, GIF, BMP, ICO, and TIFF files when
+  the outer terminal supports the Kitty graphics protocol. Enable Herdr's pane graphics layer
+  with `experimental.kitty_graphics = true` in its `config.toml`. Source Control image diffs
+  show Before and After side by side for working-tree, staged, and historical changes; added or
+  deleted images leave the missing side blank, while untracked images show only After. Animated
+  formats show their first frame, and unsupported hosts show a text fallback.
 - **Drag to select exact source characters** in ordinary files and structured diffs. Copy the
   raw selection, or attach comments and send the accumulated review to an agent without editing
   the file. Saved ranges stay highlighted in Preview and reveal their temporary Comment in a

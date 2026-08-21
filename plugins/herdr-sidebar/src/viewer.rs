@@ -7,15 +7,19 @@
 //! both sidebar views.
 
 use std::collections::HashSet;
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead, Cursor, Read as _, Seek, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageReader};
 use ratatui::buffer::CellWidth;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
@@ -41,6 +45,11 @@ const NOTICE_DURATION: Duration = Duration::from_secs(3);
 /// Preview size guards: don't slurp huge files into a pane.
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_LINES: usize = 5000;
+const MAX_IMAGE_BYTES: usize = 512 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 2048;
+const MAX_DECODE_DIMENSION: u32 = 16_384;
+const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const IMAGE_DIFF_GAP: u32 = 8;
 
 /// Enough room for the viewer to remain useful on a narrow terminal.
 const MIN_PREVIEW_WIDTH: u16 = 24;
@@ -113,6 +122,8 @@ enum Request {
     Diff {
         root: PathBuf,
         rel: String,
+        /// Rename/copy source path, when Git reports one.
+        old_rel: Option<String>,
         /// "staged" | "worktree" | "untracked" — which diff to run.
         kind: String,
         /// Current-file line requested by a hyperlink, when present.
@@ -166,13 +177,25 @@ pub fn search_file_request(
 }
 
 /// Control-file payload for a git diff (`kind`: staged | worktree | untracked).
-pub fn diff_request(root: &Path, rel: &str, kind: &str) -> String {
-    format!("diff\t{}\t{rel}\t{kind}", root.display())
+pub fn diff_request(root: &Path, rel: &str, old_rel: Option<&str>, kind: &str) -> String {
+    old_rel.map_or_else(
+        || format!("diff\t{}\t{rel}\t{kind}", root.display()),
+        |old_rel| format!("diff\t{}\t{rel}\t{kind}\t\t{old_rel}", root.display()),
+    )
 }
 
 /// Control-file payload for a git diff anchored to one current-file line.
-pub fn diff_line_request(root: &Path, rel: &str, kind: &str, line: usize) -> String {
-    format!("diff\t{}\t{rel}\t{kind}\t{line}", root.display())
+pub fn diff_line_request(
+    root: &Path,
+    rel: &str,
+    old_rel: Option<&str>,
+    kind: &str,
+    line: usize,
+) -> String {
+    old_rel.map_or_else(
+        || format!("diff\t{}\t{rel}\t{kind}\t{line}", root.display()),
+        |old_rel| format!("diff\t{}\t{rel}\t{kind}\t{line}\t{old_rel}", root.display()),
+    )
 }
 
 /// Immutable structured diff between two revisions for one historical file.
@@ -208,7 +231,14 @@ fn parse_request(raw: &str) -> Option<Request> {
             let rel = parts.next()?.to_string();
             let kind = parts.next().unwrap_or("worktree").to_string();
             let line = parts.next().and_then(|line| line.parse().ok());
-            Some(Request::Diff { root, rel, kind, line })
+            let old_rel = parts.next().filter(|path| !path.is_empty()).map(str::to_string);
+            Some(Request::Diff {
+                root,
+                rel,
+                old_rel,
+                kind,
+                line,
+            })
         }
         Some("show") => {
             let root = PathBuf::from(parts.next()?);
@@ -2387,6 +2417,430 @@ fn preview_outer_hint(search: &PreviewSearch) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImagePlacement {
+    viewport_col: i32,
+    viewport_row: i32,
+    grid_cols: u16,
+    grid_rows: u16,
+}
+
+struct PreparedImage {
+    data_base64: String,
+    width: u32,
+    height: u32,
+    cell_width_px: u32,
+    cell_height_px: u32,
+}
+
+enum ImagePreview {
+    Loading(Receiver<Result<PreparedImage, String>>),
+    Ready {
+        image: PreparedImage,
+        placement: Option<ImagePlacement>,
+    },
+    Failed,
+}
+
+#[derive(serde::Deserialize)]
+struct PaneGraphicsInfo {
+    cell_width_px: u32,
+    cell_height_px: u32,
+}
+
+fn is_image_path(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "bmp" | "gif" | "ico" | "jpeg" | "jpg" | "png" | "tif" | "tiff" | "webp"
+    )
+}
+
+fn image_request_path(request: &Request) -> Option<PathBuf> {
+    match request {
+        Request::File(path) | Request::FileLine { path, .. } | Request::SearchFile { path, .. } => {
+            is_image_path(path).then(|| path.clone())
+        }
+        Request::Diff { root, rel, old_rel, .. }
+        | Request::RefDiff { root, rel, old_rel, .. } => {
+            (is_image_path(Path::new(rel))
+                || old_rel.as_deref().is_some_and(|path| is_image_path(Path::new(path))))
+            .then(|| root.join(rel))
+        }
+        Request::Show { .. } => None,
+    }
+}
+
+fn image_doc(request: &Request, message: &str) -> Doc {
+    let path = image_request_path(request).expect("image document requires an image request");
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let context = match request {
+        Request::Diff { kind, .. } if kind == "untracked" => {
+            format!("{} — After", path.display())
+        }
+        Request::Diff { .. } | Request::RefDiff { .. } => {
+            format!("{} — Before | After", path.display())
+        }
+        _ => path.to_string_lossy().into_owned(),
+    };
+    Doc::new(
+        name,
+        context,
+        vec![Line::styled(message.to_string(), Style::default().dim())],
+        false,
+        Vec::new(),
+    )
+}
+
+fn start_image_preview(owner: String, request: Request) -> ImagePreview {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(load_image_preview(&owner, &request));
+    });
+    ImagePreview::Loading(receiver)
+}
+
+fn load_image_preview(owner: &str, request: &Request) -> Result<PreparedImage, String> {
+    let info = api_result(
+        "pane.graphics.info",
+        serde_json::json!({ "pane_id": owner }),
+    )?;
+    let info: PaneGraphicsInfo = serde_json::from_value(info)
+        .map_err(|err| format!("invalid pane graphics response: {err}"))?;
+    if info.cell_width_px == 0 || info.cell_height_px == 0 {
+        return Err("terminal cell pixel size is unavailable".to_string());
+    }
+
+    let image = match request {
+        Request::File(path) | Request::FileLine { path, .. } | Request::SearchFile { path, .. } => {
+            decode_image_path(path)?
+        }
+        Request::Diff { root, rel, old_rel, kind, .. } => {
+            load_image_diff(root, rel, old_rel.as_deref(), kind)?
+        }
+        Request::RefDiff { root, old_spec, new_spec, rel, old_rel } => load_ref_image_diff(
+            root,
+            old_spec,
+            new_spec,
+            rel,
+            old_rel.as_deref(),
+        )?,
+        Request::Show { .. } => return Err("request is not an image preview".to_string()),
+    };
+    prepare_image(image, info, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION)
+}
+
+fn decode_image_path(path: &Path) -> Result<DynamicImage, String> {
+    let reader = ImageReader::open(path).map_err(|err| err.to_string())?;
+    decode_image_reader(reader)
+}
+
+fn decode_image_bytes(bytes: Vec<u8>) -> Result<DynamicImage, String> {
+    decode_image_reader(ImageReader::new(Cursor::new(bytes)))
+}
+
+fn decode_image_reader<R>(reader: ImageReader<R>) -> Result<DynamicImage, String>
+where
+    R: BufRead + Seek,
+{
+    let mut reader = reader.with_guessed_format().map_err(|err| err.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_DECODE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().map_err(|err| err.to_string())?;
+    let orientation = decoder.orientation().map_err(|err| err.to_string())?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|err| err.to_string())?;
+    image.apply_orientation(orientation);
+    Ok(image)
+}
+
+fn git_blob(root: &Path, spec: &str, rel: &str) -> Result<Option<Vec<u8>>, String> {
+    let object = if spec.is_empty() {
+        format!(":{}", rel.replace('\\', "/"))
+    } else {
+        format!("{spec}:{}", rel.replace('\\', "/"))
+    };
+    let size = Command::new("git")
+        .args(["cat-file", "-s", &object])
+        .current_dir(root)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !size.status.success() {
+        return Ok(None);
+    }
+    let size = String::from_utf8_lossy(&size.stdout)
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("invalid Git blob size for {rel}"))?;
+    if size > MAX_DECODE_BYTES {
+        return Err(format!("image blob exceeds {} MiB", MAX_DECODE_BYTES / 1024 / 1024));
+    }
+    let output = Command::new("git")
+        .args(["cat-file", "blob", &object])
+        .current_dir(root)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(output.stdout))
+}
+
+fn worktree_blob(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if metadata.len() > MAX_DECODE_BYTES {
+        return Err(format!("image file exceeds {} MiB", MAX_DECODE_BYTES / 1024 / 1024));
+    }
+    std::fs::read(path).map(Some).map_err(|err| err.to_string())
+}
+
+fn decoded_optional(bytes: Option<Vec<u8>>) -> Option<DynamicImage> {
+    bytes.and_then(|bytes| decode_image_bytes(bytes).ok())
+}
+
+fn load_image_diff(
+    root: &Path,
+    rel: &str,
+    old_rel: Option<&str>,
+    kind: &str,
+) -> Result<DynamicImage, String> {
+    let old_rel = old_rel.unwrap_or(rel);
+    let (before, after, side_by_side) = match kind {
+        "untracked" => (None, worktree_blob(&root.join(rel))?, false),
+        "staged" => (git_blob(root, "HEAD", old_rel)?, git_blob(root, "", rel)?, true),
+        _ => (git_blob(root, "", old_rel)?, worktree_blob(&root.join(rel))?, true),
+    };
+    compose_image_diff(
+        decoded_optional(before),
+        decoded_optional(after),
+        side_by_side,
+    )
+}
+
+fn load_ref_image_diff(
+    root: &Path,
+    old_spec: &str,
+    new_spec: &str,
+    rel: &str,
+    old_rel: Option<&str>,
+) -> Result<DynamicImage, String> {
+    compose_image_diff(
+        decoded_optional(git_blob(root, old_spec, old_rel.unwrap_or(rel))?),
+        decoded_optional(git_blob(root, new_spec, rel)?),
+        true,
+    )
+}
+
+fn compose_image_diff(
+    before: Option<DynamicImage>,
+    after: Option<DynamicImage>,
+    side_by_side: bool,
+) -> Result<DynamicImage, String> {
+    if !side_by_side {
+        return after
+            .or(before)
+            .ok_or_else(|| "no decodable image content found".to_string());
+    }
+    if before.is_none() && after.is_none() {
+        return Err("neither diff side contains a decodable image".to_string());
+    }
+
+    let panel_max_width = ((MAX_IMAGE_DIMENSION - IMAGE_DIFF_GAP) / 2).max(1);
+    let fit_panel = |image: DynamicImage| {
+        if image.width() > panel_max_width || image.height() > MAX_IMAGE_DIMENSION {
+            image.resize(
+                panel_max_width,
+                MAX_IMAGE_DIMENSION,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            image
+        }
+    };
+    let before = before.map(&fit_panel);
+    let after = after.map(fit_panel);
+    let panel_width = before
+        .as_ref()
+        .map(DynamicImage::width)
+        .into_iter()
+        .chain(after.as_ref().map(DynamicImage::width))
+        .max()
+        .unwrap_or(1);
+    let panel_height = before
+        .as_ref()
+        .map(DynamicImage::height)
+        .into_iter()
+        .chain(after.as_ref().map(DynamicImage::height))
+        .max()
+        .unwrap_or(1);
+    let mut canvas = image::RgbaImage::new(panel_width * 2 + IMAGE_DIFF_GAP, panel_height);
+    if let Some(before) = before {
+        let rgba = before.to_rgba8();
+        image::imageops::overlay(
+            &mut canvas,
+            &rgba,
+            i64::from((panel_width - rgba.width()) / 2),
+            i64::from((panel_height - rgba.height()) / 2),
+        );
+    }
+    if let Some(after) = after {
+        let rgba = after.to_rgba8();
+        image::imageops::overlay(
+            &mut canvas,
+            &rgba,
+            i64::from(panel_width + IMAGE_DIFF_GAP + (panel_width - rgba.width()) / 2),
+            i64::from((panel_height - rgba.height()) / 2),
+        );
+    }
+    let divider = panel_width + IMAGE_DIFF_GAP / 2;
+    for y in 0..panel_height {
+        canvas.put_pixel(divider, y, image::Rgba([128, 128, 128, 160]));
+    }
+    Ok(DynamicImage::ImageRgba8(canvas))
+}
+
+fn prepare_image(
+    mut image: DynamicImage,
+    info: PaneGraphicsInfo,
+    max_bytes: usize,
+    max_dimension: u32,
+) -> Result<PreparedImage, String> {
+    if image.width() > max_dimension || image.height() > max_dimension {
+        image = image.resize(
+            max_dimension,
+            max_dimension,
+            image::imageops::FilterType::Triangle,
+        );
+    }
+
+    loop {
+        let rgba = image.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        let mut png = Vec::new();
+        PngEncoder::new_with_quality(
+            &mut png,
+            CompressionType::Fast,
+            FilterType::Adaptive,
+        )
+        .write_image(
+            rgba.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|err| err.to_string())?;
+        if png.len() <= max_bytes {
+            return Ok(PreparedImage {
+                data_base64: base64::engine::general_purpose::STANDARD.encode(png),
+                width,
+                height,
+                cell_width_px: info.cell_width_px,
+                cell_height_px: info.cell_height_px,
+            });
+        }
+        if width == 1 && height == 1 {
+            return Err("image cannot fit the pane graphics payload limit".to_string());
+        }
+
+        let scale = ((max_bytes as f64 / png.len() as f64).sqrt() * 0.9).clamp(0.1, 0.9);
+        let mut next_width = ((width as f64 * scale).floor() as u32).max(1);
+        let mut next_height = ((height as f64 * scale).floor() as u32).max(1);
+        if next_width == width && next_height == height {
+            if width >= height && width > 1 {
+                next_width -= 1;
+            } else if height > 1 {
+                next_height -= 1;
+            }
+        }
+        image = DynamicImage::ImageRgba8(image::imageops::resize(
+            &rgba,
+            next_width,
+            next_height,
+            image::imageops::FilterType::Triangle,
+        ));
+    }
+}
+
+fn image_placement(body: Rect, image: &PreparedImage) -> Option<ImagePlacement> {
+    if body.width == 0
+        || body.height == 0
+        || image.width == 0
+        || image.height == 0
+        || image.cell_width_px == 0
+        || image.cell_height_px == 0
+    {
+        return None;
+    }
+    let available_width_px = f64::from(body.width) * f64::from(image.cell_width_px);
+    let available_height_px = f64::from(body.height) * f64::from(image.cell_height_px);
+    let scale = (available_width_px / f64::from(image.width))
+        .min(available_height_px / f64::from(image.height));
+    let grid_cols = ((f64::from(image.width) * scale / f64::from(image.cell_width_px)).round()
+        as u16)
+        .clamp(1, body.width);
+    let grid_rows = ((f64::from(image.height) * scale / f64::from(image.cell_height_px)).round()
+        as u16)
+        .clamp(1, body.height);
+    Some(ImagePlacement {
+        viewport_col: i32::from(body.x + (body.width - grid_cols) / 2),
+        viewport_row: i32::from(body.y + (body.height - grid_rows) / 2),
+        grid_cols,
+        grid_rows,
+    })
+}
+
+fn set_image_graphics(
+    owner: &str,
+    image: &PreparedImage,
+    placement: ImagePlacement,
+) -> Result<(), String> {
+    api_result(
+        "pane.graphics.set",
+        image_graphics_params(owner, image, placement),
+    )?;
+    Ok(())
+}
+
+fn image_graphics_params(
+    owner: &str,
+    image: &PreparedImage,
+    placement: ImagePlacement,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pane_id": owner,
+        "format": "png",
+        "image_width": image.width,
+        "image_height": image.height,
+        "data_base64": image.data_base64,
+        "placement": {
+            "viewport_col": placement.viewport_col,
+            "viewport_row": placement.viewport_row,
+            "grid_cols": placement.grid_cols,
+            "grid_rows": placement.grid_rows,
+        },
+        "z_index": 0,
+    })
+}
+
+fn clear_image_graphics(owner: &str) {
+    let _ = api_result(
+        "pane.graphics.clear",
+        serde_json::json!({ "pane_id": owner }),
+    );
+}
+
 /// In-process viewer hosted by the sidebar pane while that pane is zoomed.
 pub struct InlinePreview {
     owner: Option<String>,
@@ -2394,6 +2848,7 @@ pub struct InlinePreview {
     control: Option<PathBuf>,
     current: Option<Request>,
     doc: Option<Doc>,
+    image: Option<ImagePreview>,
     theme: IconTheme,
     diff_theme: DiffTheme,
     hide_unmodified: bool,
@@ -2435,6 +2890,7 @@ impl InlinePreview {
             control,
             current: None,
             doc: None,
+            image: None,
             theme: IconTheme::resolve(
                 std::env::var("HERDR_SIDEBAR_ICONS")
                     .or_else(|_| std::env::var("HERDR_AA_FILETREE_ICONS"))
@@ -2470,8 +2926,77 @@ impl InlinePreview {
         self.notice = Some((message.into(), Instant::now() + NOTICE_DURATION));
     }
 
+    fn clear_image(&mut self) {
+        if self.image.take().is_some()
+            && let Some(owner) = self.owner.as_deref()
+        {
+            clear_image_graphics(owner);
+        }
+    }
+
+    fn show_image_message(&mut self, message: &str) {
+        let Some(request) = self.current.as_ref().filter(|request| image_request_path(request).is_some()) else {
+            return;
+        };
+        self.doc = Some(image_doc(request, message));
+    }
+
+    fn show_image_error(&mut self, error: impl std::fmt::Display) {
+        self.show_image_message(&format!("Image preview unavailable: {error}"));
+    }
+
+    fn tick_image(&mut self) -> bool {
+        let Some(state) = self.image.take() else {
+            return false;
+        };
+        let owner = self.owner.clone();
+        let next = match state {
+            ImagePreview::Loading(receiver) => match receiver.try_recv() {
+                Ok(Ok(image)) => {
+                    self.show_image_message("");
+                    ImagePreview::Ready {
+                        image,
+                        placement: None,
+                    }
+                }
+                Ok(Err(error)) => {
+                    self.show_image_error(error);
+                    ImagePreview::Failed
+                }
+                Err(TryRecvError::Empty) => ImagePreview::Loading(receiver),
+                Err(TryRecvError::Disconnected) => {
+                    self.show_image_error("image loader stopped unexpectedly");
+                    ImagePreview::Failed
+                }
+            },
+            ImagePreview::Ready {
+                image,
+                mut placement,
+            } => {
+                let desired = image_placement(self.body, &image);
+                if desired != placement
+                    && let (Some(owner), Some(desired)) = (owner.as_deref(), desired)
+                {
+                    match set_image_graphics(owner, &image, desired) {
+                        Ok(()) => placement = Some(desired),
+                        Err(error) => {
+                            clear_image_graphics(owner);
+                            self.show_image_error(error);
+                            self.image = Some(ImagePreview::Failed);
+                            return true;
+                        }
+                    }
+                }
+                ImagePreview::Ready { image, placement }
+            }
+            ImagePreview::Failed => ImagePreview::Failed,
+        };
+        self.image = Some(next);
+        true
+    }
+
     fn start_search(&mut self) {
-        if self.doc.is_none() {
+        if self.doc.is_none() || self.image.is_some() {
             return;
         }
         self.notice = None;
@@ -2945,6 +3470,7 @@ impl InlinePreview {
                 self.cancel_comment();
                 self.clear_search();
                 self.agent_picker = None;
+                self.clear_image();
                 self.current = None;
                 self.doc = None;
                 self.expanded_folds.clear();
@@ -2957,11 +3483,27 @@ impl InlinePreview {
         self.cancel_comment();
         self.clear_search();
         self.agent_picker = None;
+        self.clear_image();
         self.sidebar_width = width.max(1);
         let state = crate::state::load_state();
         self.diff_theme = state.diff_theme;
         self.hide_unmodified = state.hide_unmodified;
         self.expanded_folds.clear();
+        if image_request_path(&request).is_some() {
+            self.doc = Some(image_doc(&request, "Loading image..."));
+            let image_request = request.clone();
+            self.current = Some(request);
+            self.image = if let Some(owner) = self.owner.clone() {
+                Some(start_image_preview(owner, image_request))
+            } else {
+                self.show_image_error("pane identity is unavailable");
+                Some(ImagePreview::Failed)
+            };
+            self.dragging_selection = false;
+            self.selection_dragged = false;
+            self.last_refresh = Instant::now();
+            return;
+        }
         let mut doc = load(
             &request,
             self.diff_theme,
@@ -3081,7 +3623,11 @@ impl InlinePreview {
             let mut x = footer.x;
             let mut spans = Vec::new();
             if !selected {
-                let label = preview_outer_hint(&self.search);
+                let label = if self.image.is_some() {
+                    " Esc/q Close".to_string()
+                } else {
+                    preview_outer_hint(&self.search)
+                };
                 spans.push(Span::styled(label.clone(), Style::default().dim()));
                 x = x.saturating_add(label.cell_width());
             }
@@ -3193,6 +3739,18 @@ impl InlinePreview {
         }
         if self.agent_picker.is_some() {
             self.on_agent_picker_key(key);
+            return;
+        }
+        if self.image.is_some() {
+            match key.code {
+                KeyCode::Char('y') if key.modifiers.is_empty() => self.copy_comments(),
+                KeyCode::Char('s') if key.modifiers.is_empty() => self.choose_agent(),
+                KeyCode::Char('d') if key.modifiers.is_empty() => {
+                    self.clear_current_file_comments()
+                }
+                KeyCode::Esc | KeyCode::Char('q') => self.close(),
+                _ => {}
+            }
             return;
         }
         if is_copy_shortcut(&key) {
@@ -3457,6 +4015,9 @@ impl InlinePreview {
         {
             self.notice = None;
         }
+        if self.tick_image() {
+            return;
+        }
         if self.draft.is_some()
             || self.agent_picker.is_some()
             || self.search.is_active()
@@ -3550,6 +4111,7 @@ impl InlinePreview {
         self.footer_actions.clear();
         self.footer_hover = None;
         self.comment_hover = None;
+        self.clear_image();
         if let Some(control) = &self.control {
             let _ = std::fs::remove_file(control);
         }
@@ -4246,6 +4808,260 @@ fn move_into(tab: &str, pane: &str, target: &str, split: &str, ratio: f64) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn image_requests_include_file_and_diff_previews() {
+        assert_eq!(
+            image_request_path(&Request::File(PathBuf::from("screens/demo.PNG"))),
+            Some(PathBuf::from("screens/demo.PNG"))
+        );
+        assert_eq!(
+            image_request_path(&Request::SearchFile {
+                path: PathBuf::from("photo.webp"),
+                line: 1,
+                query: String::new(),
+                regex: false,
+                case_sensitive: false,
+                whole_word: false,
+            }),
+            Some(PathBuf::from("photo.webp"))
+        );
+        assert!(image_request_path(&Request::File(PathBuf::from("logo.svg"))).is_none());
+        assert_eq!(
+            image_request_path(&Request::Diff {
+                root: PathBuf::from("."),
+                rel: "photo.png".into(),
+                old_rel: None,
+                kind: "worktree".into(),
+                line: None,
+            }),
+            Some(PathBuf::from(".").join("photo.png"))
+        );
+    }
+
+    #[test]
+    fn image_diff_composes_before_and_after_in_fixed_panels() {
+        let red = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            1,
+            image::Rgba([255, 0, 0, 255]),
+        ));
+        let green = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            1,
+            image::Rgba([0, 255, 0, 255]),
+        ));
+
+        let both = compose_image_diff(Some(red), Some(green.clone()), true)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(both.dimensions(), (12, 1));
+        assert_eq!(both.get_pixel(0, 0), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(both.get_pixel(11, 0), &image::Rgba([0, 255, 0, 255]));
+        assert_eq!(both.get_pixel(6, 0), &image::Rgba([128, 128, 128, 160]));
+
+        let added = compose_image_diff(None, Some(green.clone()), true)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(added.get_pixel(0, 0), &image::Rgba([0, 0, 0, 0]));
+        assert_eq!(added.get_pixel(11, 0), &image::Rgba([0, 255, 0, 255]));
+
+        let untracked = compose_image_diff(None, Some(green), false)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(untracked.dimensions(), (2, 1));
+    }
+
+    #[test]
+    fn image_diff_reads_worktree_staged_and_history_versions() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-image-diff-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "sidebar@example.invalid"]);
+        git(&["config", "user.name", "Sidebar Test"]);
+
+        let path = root.join("image.png");
+        DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            1,
+            image::Rgba([255, 0, 0, 255]),
+        ))
+        .save(&path)
+        .unwrap();
+        git(&["add", "image.png"]);
+        git(&["commit", "-qm", "base"]);
+
+        DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            1,
+            image::Rgba([0, 0, 255, 255]),
+        ))
+        .save(&path)
+        .unwrap();
+        let diff = load_image_diff(&root, "image.png", None, "worktree")
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(diff.get_pixel(0, 0), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(diff.get_pixel(diff.width() - 1, 0), &image::Rgba([0, 0, 255, 255]));
+
+        let old_spec = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        git(&["add", "image.png"]);
+        DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            1,
+            image::Rgba([0, 255, 0, 255]),
+        ))
+        .save(&path)
+        .unwrap();
+        let staged = load_image_diff(&root, "image.png", None, "staged")
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(staged.get_pixel(0, 0), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(staged.get_pixel(staged.width() - 1, 0), &image::Rgba([0, 0, 255, 255]));
+
+        git(&["commit", "-qm", "update"]);
+        let new_spec = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let historical = load_ref_image_diff(
+            &root,
+            &old_spec,
+            &new_spec,
+            "image.png",
+            None,
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(historical.get_pixel(0, 0), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(
+            historical.get_pixel(historical.width() - 1, 0),
+            &image::Rgba([0, 0, 255, 255])
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_placement_preserves_pixel_aspect_ratio_and_centers() {
+        let landscape = PreparedImage {
+            data_base64: String::new(),
+            width: 1600,
+            height: 900,
+            cell_width_px: 10,
+            cell_height_px: 20,
+        };
+        assert_eq!(
+            image_placement(Rect::new(30, 2, 100, 40), &landscape),
+            Some(ImagePlacement {
+                viewport_col: 30,
+                viewport_row: 8,
+                grid_cols: 100,
+                grid_rows: 28,
+            })
+        );
+
+        let portrait = PreparedImage {
+            data_base64: String::new(),
+            width: 600,
+            height: 1200,
+            cell_width_px: 10,
+            cell_height_px: 20,
+        };
+        assert_eq!(
+            image_placement(Rect::new(30, 2, 100, 40), &portrait),
+            Some(ImagePlacement {
+                viewport_col: 60,
+                viewport_row: 2,
+                grid_cols: 40,
+                grid_rows: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn image_payload_is_resized_below_the_host_limit() {
+        let rgba = image::RgbaImage::from_fn(64, 64, |x, y| {
+            let value = x.wrapping_mul(73).wrapping_add(y.wrapping_mul(151)) as u8;
+            image::Rgba([value, value.rotate_left(3), value.rotate_left(5), 255])
+        });
+        let prepared = prepare_image(
+            DynamicImage::ImageRgba8(rgba),
+            PaneGraphicsInfo {
+                cell_width_px: 10,
+                cell_height_px: 20,
+            },
+            1024,
+            64,
+        )
+        .unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(&prepared.data_base64)
+            .unwrap();
+        assert!(png.len() <= 1024);
+        assert!(prepared.width < 64 || prepared.height < 64);
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!(decoded.width(), prepared.width);
+        assert_eq!(decoded.height(), prepared.height);
+    }
+
+    #[test]
+    fn image_graphics_request_matches_the_host_schema() {
+        let image = PreparedImage {
+            data_base64: "png".to_string(),
+            width: 320,
+            height: 200,
+            cell_width_px: 10,
+            cell_height_px: 20,
+        };
+        let placement = ImagePlacement {
+            viewport_col: 4,
+            viewport_row: 5,
+            grid_cols: 32,
+            grid_rows: 10,
+        };
+
+        assert_eq!(
+            image_graphics_params("w1:p2", &image, placement),
+            serde_json::json!({
+                "pane_id": "w1:p2",
+                "format": "png",
+                "image_width": 320,
+                "image_height": 200,
+                "data_base64": "png",
+                "placement": {
+                    "viewport_col": 4,
+                    "viewport_row": 5,
+                    "grid_cols": 32,
+                    "grid_rows": 10,
+                },
+                "z_index": 0,
+            })
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scratch_dir_is_private_to_the_owning_user() {
@@ -4324,24 +5140,42 @@ mod tests {
                 path: Some("src/a.rs".into()),
             })
         );
-        let d = diff_request(Path::new("C:/repo"), "src/a.rs", "staged");
+        let d = diff_request(Path::new("C:/repo"), "src/a.rs", None, "staged");
         assert_eq!(
             parse_request(&d),
             Some(Request::Diff {
                 root: PathBuf::from("C:/repo"),
                 rel: "src/a.rs".into(),
+                old_rel: None,
                 kind: "staged".into(),
                 line: None,
             })
         );
-        let d = diff_line_request(Path::new("C:/repo"), "src/a.rs", "worktree", 42);
+        let d = diff_line_request(Path::new("C:/repo"), "src/a.rs", None, "worktree", 42);
         assert_eq!(
             parse_request(&d),
             Some(Request::Diff {
                 root: PathBuf::from("C:/repo"),
                 rel: "src/a.rs".into(),
+                old_rel: None,
                 kind: "worktree".into(),
                 line: Some(42),
+            })
+        );
+        let d = diff_request(
+            Path::new("C:/repo"),
+            "new/photo.png",
+            Some("old/photo.png"),
+            "staged",
+        );
+        assert_eq!(
+            parse_request(&d),
+            Some(Request::Diff {
+                root: PathBuf::from("C:/repo"),
+                rel: "new/photo.png".into(),
+                old_rel: Some("old/photo.png".into()),
+                kind: "staged".into(),
+                line: None,
             })
         );
         let d = ref_diff_request(
@@ -4962,6 +5796,7 @@ mod tests {
                 Doc::new("x.txt".into(), String::new(), lines, true, Vec::new())
                     .with_sources(sources),
             ),
+            image: None,
             theme: IconTheme::Emoji,
             diff_theme: crate::syntax::DEFAULT_DIFF_THEME,
             hide_unmodified: true,

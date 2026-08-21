@@ -2951,11 +2951,19 @@ impl App {
             "worktree"
         };
         let payload = line.map_or_else(
-            || herdr_sidebar::viewer::diff_request(repo.git.root(), &entry.path, kind),
+            || {
+                herdr_sidebar::viewer::diff_request(
+                    repo.git.root(),
+                    &entry.path,
+                    entry.orig.as_deref(),
+                    kind,
+                )
+            },
             |line| {
                 herdr_sidebar::viewer::diff_line_request(
                     repo.git.root(),
                     &entry.path,
+                    entry.orig.as_deref(),
                     kind,
                     line,
                 )

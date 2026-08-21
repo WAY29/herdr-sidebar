@@ -323,6 +323,9 @@ Terminal fonts for icon glyphs (Windows, verified live):
 - Sextants (U+1FB00 Symbols for Legacy Computing) and braille are covered by the Cascadia
   family; arbitrary glyph rotation is impossible in terminals — herdr can forward Kitty
   graphics to the host terminal, but Windows Terminal doesn't render that protocol.
+- Herdr's static `pane.graphics.set` request uses `format` plus `image_width` /
+  `image_height`, with `viewport_col`, `viewport_row`, `grid_cols`, and `grid_rows`
+  nested under `placement`; the geometry fields are not accepted at the request root.
 
 Building herdr itself from source (for local patches): needs Zig ≥ 0.15.2 on PATH or via
 `ZIG=<path>` (build.rs compiles the vendored `libghostty-vt`); the 0.15.2 zig build failed on
@@ -631,6 +634,18 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   is created. Esc/q removes the request and sends `pane.zoom off`, revealing the exact
   original layout. The old park-plan reader remains only
   to bring home panes left by older builds; no new park plans are written.
+- Static PNG/JPEG/WebP/GIF/BMP/ICO/TIFF file requests use Herdr's `pane.graphics.info`,
+  `pane.graphics.set`, and `pane.graphics.clear` APIs when
+  `experimental.kitty_graphics = true`; do not emit Kitty escape sequences directly from
+  ratatui. Decode, EXIF orientation, resize, and PNG re-encoding run on a background thread,
+  with decoded dimensions/allocation bounded and the v0.8 static payload kept at or below
+  512 KiB. The resulting primary layer is centered within the Viewer body using Herdr's cell
+  pixel size, replaced after resize, and cleared before switching documents or unzooming.
+  SCM image diffs use the same layer and compose Before/After side by side: worktree is
+  index-to-disk, staged is HEAD-to-index, and historical refs use their explicit old/new specs;
+  rename requests carry the old Git path, added/deleted images leave one panel blank, and
+  untracked images show only After. Unsupported hosts retain a text fallback; SVG and animation
+  playback remain out of scope (animated formats show the first decoded frame).
 - Preview focus restoration follows the opener: when a file is clicked while another pane
   owns focus, Esc/q unzooms and `pane.focus` returns to that exact same-tab pane; when Preview
   is opened from an already-focused Sidebar (for example with Enter), focus stays in Sidebar.

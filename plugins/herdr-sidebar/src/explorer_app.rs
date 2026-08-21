@@ -477,11 +477,19 @@ impl App {
             },
             |diff| {
                 line.map_or_else(
-                    || herdr_sidebar::viewer::diff_request(&diff.root, &diff.rel, &diff.kind),
+                    || {
+                        herdr_sidebar::viewer::diff_request(
+                            &diff.root,
+                            &diff.rel,
+                            None,
+                            &diff.kind,
+                        )
+                    },
                     |line| {
                         herdr_sidebar::viewer::diff_line_request(
                             &diff.root,
                             &diff.rel,
+                            None,
                             &diff.kind,
                             line,
                         )
