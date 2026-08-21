@@ -62,6 +62,10 @@ A real tree, not a directory dump:
   the file. Saved ranges stay highlighted in Preview and reveal their temporary Comment in a
   tooltip on hover. Tabs, Unicode width, diff gutters, and wrapped rows stay mapped to the source
   text.
+- **Search inside the open Preview** with `/`, using a Rust regex. Press `Enter` to confirm and
+  `n` / `N` to move forward or backward with wraparound. Matches and the current match use colors
+  from the active Diff Theme; a match inside folded diff context expands only that fold. Search
+  and Comment inputs support Left/Right and Home/End cursor movement.
 - **Double-click folders** to fold, hover highlights, mouse wheel, a full root-relative path
   tooltip for every file and folder, and a hover **⋯ menu button**: New File, New Folder,
   Open with Default App (files
@@ -249,6 +253,8 @@ Settings and `b` hides the Sidebar when focus is not inside a Search text field.
 
 | Preview | What it does |
 |---|---|
+| `/`, then `Enter` | search the current Preview with a regex |
+| `n` / `N` | move to the next / previous match, wrapping at the ends |
 | Left drag | select characters in source files and structured diffs |
 | `Cmd+C` (macOS), `Ctrl+C` (elsewhere) | copy the raw selection |
 | `c` | comment on the selection; hover the saved highlight to read it |
@@ -264,7 +270,9 @@ an active selection temporarily shows `c Comment` and the platform copy shortcut
 the outer `drag to select text` footer, which appends `y Copy`, `s Send Agent`, and `d Clear N` once
 comments exist. Comments are removed after a successful copy/send, or per file with `d`, and are
 never written to the source file.
-Selection, saved-comment, and tooltip accent colors follow the active Diff Theme.
+Search-match, current-match, selection, saved-comment, and tooltip accent colors follow the active
+Diff Theme. `Esc` cancels search input first; outside the input it clears an active text selection,
+then a confirmed search, before closing Preview.
 
 File hyperlinks handled by the patched Herdr host open changed files in Source Control: the
 owning repository and Staged/Changes tree are expanded, the file row is selected, and Preview

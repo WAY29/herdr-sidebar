@@ -366,6 +366,52 @@ struct TextSelection {
     cursor: TextPoint,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchMatch {
+    row: usize,
+    source: SearchSourceId,
+    fold: Option<crate::diffview::FoldId>,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchSourceId {
+    Rendered(usize),
+    Source(SourceKind),
+}
+
+struct SearchSource {
+    row: usize,
+    fold: Option<crate::diffview::FoldId>,
+    raw: String,
+    kind: SourceKind,
+}
+
+impl SearchMatch {
+    fn same_source_range(self, other: Self) -> bool {
+        self.source == other.source && self.start == other.start && self.end == other.end
+    }
+}
+
+fn search_matches_on_row(matches: &[SearchMatch], row: usize) -> &[SearchMatch] {
+    let start = matches.partition_point(|found| found.row < row);
+    let end = matches[start..].partition_point(|found| found.row == row) + start;
+    &matches[start..end]
+}
+
+fn stepped_search_index(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match (current, forward) {
+        (Some(index), true) => (index + 1) % len,
+        (Some(0), false) | (None, false) => len - 1,
+        (Some(index), false) => index - 1,
+        (None, true) => 0,
+    })
+}
+
 impl TextSelection {
     fn normalized(self) -> (TextPoint, TextPoint) {
         if self.anchor <= self.cursor {
@@ -574,6 +620,7 @@ struct Doc {
     visual_fragments: Vec<VisualFragment>,
     visual_width: u16,
     sources: Vec<Option<SelectableRow>>,
+    search_sources: Vec<SearchSource>,
     selection: Option<TextSelection>,
     first_change: Option<usize>,
     center_first_change_pending: bool,
@@ -609,6 +656,7 @@ impl Doc {
             visual_fragments: Vec::new(),
             visual_width: 0,
             sources: Vec::new(),
+            search_sources: Vec::new(),
             selection: None,
             first_change: None,
             center_first_change_pending: false,
@@ -620,6 +668,11 @@ impl Doc {
     fn with_sources(mut self, sources: Vec<Option<SelectableRow>>) -> Self {
         debug_assert_eq!(self.lines.len(), sources.len());
         self.sources = sources;
+        self
+    }
+
+    fn with_search_sources(mut self, search_sources: Vec<SearchSource>) -> Self {
+        self.search_sources = search_sources;
         self
     }
 
@@ -958,6 +1011,138 @@ impl Doc {
         ))
     }
 
+    fn search_matches(&self, regex: &regex::Regex) -> Vec<SearchMatch> {
+        if self.sources.iter().any(Option::is_some) || !self.search_sources.is_empty() {
+            let mut matches = Vec::new();
+            let mut hidden = 0;
+            for row in 0..self.lines.len() {
+                if let Some(source) = self.sources.get(row).and_then(Option::as_ref) {
+                    matches.extend(regex.find_iter(&source.raw).map(|found| SearchMatch {
+                        row,
+                        source: SearchSourceId::Source(source.kind),
+                        fold: None,
+                        start: found.start(),
+                        end: found.end(),
+                    }));
+                }
+                while self.search_sources.get(hidden).is_some_and(|source| source.row == row) {
+                    let source = &self.search_sources[hidden];
+                    matches.extend(regex.find_iter(&source.raw).map(|found| SearchMatch {
+                        row,
+                        source: SearchSourceId::Source(source.kind),
+                        fold: source.fold,
+                        start: found.start(),
+                        end: found.end(),
+                    }));
+                    hidden += 1;
+                }
+            }
+            return matches;
+        }
+        self.lines
+            .iter()
+            .enumerate()
+            .flat_map(|(row, line)| {
+                let text = line.to_string();
+                regex
+                    .find_iter(&text)
+                    .map(|found| SearchMatch {
+                        row,
+                        source: SearchSourceId::Rendered(row),
+                        fold: None,
+                        start: found.start(),
+                        end: found.end(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn search_cells(&self, visual_row: usize, found: SearchMatch) -> Option<(usize, usize)> {
+        if found.fold.is_some() {
+            return None;
+        }
+        if let Some(source) = self.sources.get(found.row).and_then(Option::as_ref) {
+            if found.start != found.end {
+                return self.range_cells(
+                    visual_row,
+                    TextSelection {
+                        anchor: TextPoint { row: found.row, byte: found.start },
+                        cursor: TextPoint { row: found.row, byte: found.end },
+                    },
+                );
+            }
+            let fragment = self.fragment_at(visual_row)?;
+            if fragment.source_row != found.row {
+                return None;
+            }
+            let (unit_index, unit) = source
+                .units
+                .iter()
+                .enumerate()
+                .find(|(_, unit)| unit.raw_end > found.start)
+                .or_else(|| source.units.iter().enumerate().next_back())?;
+            if unit_index < fragment.unit_start || unit_index >= fragment.unit_end {
+                return None;
+            }
+            let first_cell = source.units.get(fragment.unit_start)?.cell_start;
+            return Some((
+                fragment.content_x + unit.cell_start.saturating_sub(first_cell),
+                fragment.content_x + unit.cell_end.saturating_sub(first_cell),
+            ));
+        }
+        if self.visual_width != 0 || visual_row != found.row {
+            return None;
+        }
+        let text = self.lines.get(found.row)?.to_string();
+        let units = SelectableRow::file(&text, found.row + 1).units;
+        let first = units
+            .iter()
+            .find(|unit| {
+                if found.start == found.end {
+                    unit.raw_end > found.start
+                } else {
+                    unit.raw_end > found.start && unit.raw_start < found.end
+                }
+            })
+            .or_else(|| units.last())?;
+        if found.start == found.end {
+            return Some((first.cell_start, first.cell_end));
+        }
+        let last = units
+            .iter()
+            .rev()
+            .find(|unit| unit.raw_end > found.start && unit.raw_start < found.end)?;
+        Some((first.cell_start, last.cell_end))
+    }
+
+    fn search_visual_row(&self, found: SearchMatch) -> Option<usize> {
+        if self.visual_width == 0 {
+            return (found.row < self.lines.len()).then_some(found.row);
+        }
+        if found.fold.is_some() {
+            return self.visual_rows.iter().position(|row| *row == found.row);
+        }
+        let source = self.sources.get(found.row).and_then(Option::as_ref)?;
+        let unit_index = source
+            .units
+            .iter()
+            .position(|unit| unit.raw_end > found.start)
+            .or_else(|| source.units.len().checked_sub(1));
+        self.visual_fragments.iter().position(|fragment| {
+            fragment.source_row == found.row
+                && unit_index.is_none_or(|unit| {
+                    unit >= fragment.unit_start && unit < fragment.unit_end
+                })
+        })
+    }
+
+    fn center_on_visual_row(&mut self, visual_row: usize, height: u16) {
+        let height = usize::from(height).max(1);
+        let max_scroll = self.visual_len().saturating_sub(height);
+        self.scroll = visual_row.saturating_sub(height / 2).min(max_scroll);
+    }
+
     fn request_first_change_center(&mut self) {
         self.center_first_change_pending = self.first_change.is_some();
     }
@@ -1009,9 +1194,7 @@ impl Doc {
                 .position(|row| *row == source_row)
                 .unwrap_or(source_row)
         };
-        let height = usize::from(height).max(1);
-        let max_scroll = self.visual_len().saturating_sub(height);
-        self.scroll = visual_row.saturating_sub(height / 2).min(max_scroll);
+        self.center_on_visual_row(visual_row, height);
     }
 
     fn active_source_highlight(&self) -> Option<usize> {
@@ -1510,7 +1693,7 @@ fn load_diff(
     args.push("--".into());
     args.push(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
 
-    let (lines, folds, first_change, sources) = run_structured_diff(
+    let (lines, folds, first_change, sources, search_sources) = run_structured_diff(
         root,
         rel,
         &args,
@@ -1530,7 +1713,8 @@ fn load_diff(
         false,
         folds,
     )
-    .with_sources(sources);
+    .with_sources(sources)
+    .with_search_sources(search_sources);
     doc.first_change = first_change;
     doc
 }
@@ -1559,7 +1743,7 @@ fn load_ref_diff(
         args.push(old_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     }
     args.push(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let (lines, folds, first_change, sources) = run_structured_diff(
+    let (lines, folds, first_change, sources, search_sources) = run_structured_diff(
         root,
         rel,
         &args,
@@ -1574,7 +1758,8 @@ fn load_ref_diff(
         false,
         folds,
     )
-    .with_sources(sources);
+    .with_sources(sources)
+    .with_search_sources(search_sources);
     doc.first_change = first_change;
     doc
 }
@@ -1584,6 +1769,7 @@ type StructuredDiffDoc = (
     Vec<Option<crate::diffview::FoldId>>,
     Option<usize>,
     Vec<Option<SelectableRow>>,
+    Vec<SearchSource>,
 );
 
 fn run_structured_diff(
@@ -1604,6 +1790,7 @@ fn run_structured_diff(
             Vec::new(),
             None,
             vec![None],
+            Vec::new(),
         ),
         Ok(out) => {
             // --no-index exits 1 when the files differ; that's not an error.
@@ -1616,6 +1803,7 @@ fn run_structured_diff(
                         Vec::new(),
                         None,
                         vec![None],
+                        Vec::new(),
                     )
                 } else {
                     (
@@ -1623,6 +1811,7 @@ fn run_structured_diff(
                         Vec::new(),
                         None,
                         vec![None],
+                        Vec::new(),
                     )
                 }
             } else {
@@ -1638,6 +1827,9 @@ fn run_structured_diff(
                     rendered.lines.truncate(MAX_LINES);
                     rendered.folds.truncate(MAX_LINES);
                     rendered.sources.truncate(MAX_LINES);
+                    rendered
+                        .hidden_search_sources
+                        .retain(|source| source.row < MAX_LINES);
                     rendered.first_change = rendered.first_change.filter(|row| *row < MAX_LINES);
                     rendered.lines.push(Line::raw("… (truncated)"));
                     rendered.folds.push(None);
@@ -1651,6 +1843,20 @@ fn run_structured_diff(
                         .sources
                         .into_iter()
                         .map(|source| source.map(SelectableRow::diff))
+                        .collect(),
+                    rendered
+                        .hidden_search_sources
+                        .into_iter()
+                        .map(|source| SearchSource {
+                            row: source.row,
+                            fold: source.fold,
+                            raw: source.source.text,
+                            kind: SourceKind::Diff {
+                                old_line: source.source.old_line,
+                                new_line: source.source.new_line,
+                                kind: source.source.kind,
+                            },
+                        })
                         .collect(),
                 )
             }
@@ -2148,6 +2354,39 @@ fn draw_comment_tooltip(
     );
 }
 
+#[derive(Default)]
+struct SearchInput {
+    text: String,
+    caret: usize,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct PreviewSearch {
+    pattern: String,
+    input: Option<SearchInput>,
+    matches: Vec<SearchMatch>,
+    current: Option<usize>,
+}
+
+impl PreviewSearch {
+    fn is_active(&self) -> bool {
+        self.input.is_some() || !self.pattern.is_empty()
+    }
+}
+
+fn preview_outer_hint(search: &PreviewSearch) -> String {
+    if search.pattern.is_empty() {
+        " / Search  drag to select text".to_string()
+    } else {
+        let current = search.current.map_or(0, |index| index + 1);
+        format!(
+            " / Search  {current}/{}  n Next  N Prev",
+            search.matches.len()
+        )
+    }
+}
+
 /// In-process viewer hosted by the sidebar pane while that pane is zoomed.
 pub struct InlinePreview {
     owner: Option<String>,
@@ -2164,6 +2403,7 @@ pub struct InlinePreview {
     body: Rect,
     dragging_selection: bool,
     selection_dragged: bool,
+    search: PreviewSearch,
     comments: Vec<SavedComment>,
     draft: Option<CommentDraft>,
     agent_picker: Option<AgentPicker>,
@@ -2210,6 +2450,7 @@ impl InlinePreview {
             body: Rect::default(),
             dragging_selection: false,
             selection_dragged: false,
+            search: PreviewSearch::default(),
             comments: Vec::new(),
             draft: None,
             agent_picker: None,
@@ -2227,6 +2468,201 @@ impl InlinePreview {
 
     fn set_notice(&mut self, message: impl Into<String>) {
         self.notice = Some((message.into(), Instant::now() + NOTICE_DURATION));
+    }
+
+    fn start_search(&mut self) {
+        if self.doc.is_none() {
+            return;
+        }
+        self.notice = None;
+        self.search.input = Some(SearchInput::default());
+        self.agent_picker = None;
+        if let Some(doc) = self.doc.as_mut() {
+            doc.clear_selection();
+        }
+        let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+    }
+
+    fn cancel_search_input(&mut self) {
+        if self.search.input.take().is_some() {
+            let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+            self.notice = None;
+        }
+    }
+
+    fn clear_search(&mut self) {
+        self.cancel_search_input();
+        self.search = PreviewSearch::default();
+        self.notice = None;
+    }
+
+    fn rebuild_search(&mut self, center: bool) {
+        if self.search.pattern.is_empty() {
+            self.search.matches.clear();
+            self.search.current = None;
+            return;
+        }
+        let Ok(regex) = build_search_regex(&self.search.pattern, true, true, false) else {
+            self.clear_search();
+            return;
+        };
+        let Some(doc) = self.doc.as_mut() else {
+            self.clear_search();
+            return;
+        };
+        doc.ensure_visual_lines(self.body.width.max(1));
+        let matches = doc.search_matches(&regex);
+        let current = (!matches.is_empty()).then(|| {
+            matches
+                .iter()
+                .position(|found| {
+                    doc.search_visual_row(*found)
+                        .is_some_and(|row| row >= doc.scroll)
+                })
+                .unwrap_or(0)
+        });
+        self.search.matches = matches;
+        self.search.current = current;
+        if center {
+            self.reveal_current_search();
+        }
+    }
+
+    fn reveal_current_search(&mut self) {
+        let Some(mut found) = self
+            .search
+            .current
+            .and_then(|index| self.search.matches.get(index))
+            .copied()
+        else {
+            return;
+        };
+        if let Some(fold) = found.fold
+            && self.expanded_folds.insert(fold)
+        {
+            let target = found;
+            self.reload_current_preserving_view();
+            if let Some(index) = self
+                .search
+                .matches
+                .iter()
+                .position(|candidate| candidate.same_source_range(target))
+            {
+                self.search.current = Some(index);
+                found = self.search.matches[index];
+            }
+        }
+        if let Some(doc) = self.doc.as_mut() {
+            doc.clear_selection();
+            doc.ensure_visual_lines(self.body.width.max(1));
+            if let Some(row) = doc.search_visual_row(found) {
+                doc.center_on_visual_row(row, self.body.height);
+            }
+        }
+    }
+
+    fn commit_search(&mut self) {
+        let Some(input) = self.search.input.as_ref() else {
+            return;
+        };
+        let pattern = if input.text.is_empty() {
+            self.search.pattern.clone()
+        } else {
+            input.text.clone()
+        };
+        if pattern.is_empty() {
+            if let Some(input) = self.search.input.as_mut() {
+                input.error = Some("Empty pattern".to_string());
+            }
+            return;
+        }
+        if build_search_regex(&pattern, true, true, false).is_err() {
+            if let Some(input) = self.search.input.as_mut() {
+                input.error = Some("Invalid regex".to_string());
+            }
+            return;
+        }
+        self.search.pattern = pattern;
+        self.cancel_search_input();
+        self.rebuild_search(true);
+        if self.search.matches.is_empty() {
+            self.set_notice("Pattern not found");
+        }
+    }
+
+    fn on_search_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.cancel_search_input();
+            return;
+        }
+        if key.code == KeyCode::Enter
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            self.commit_search();
+            return;
+        }
+        let Some(input) = self.search.input.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Backspace => {
+                let previous = previous_grapheme_boundary(&input.text, input.caret);
+                input.text.replace_range(previous..input.caret, "");
+                input.caret = previous;
+                input.error = None;
+            }
+            KeyCode::Delete => {
+                let next = next_grapheme_boundary(&input.text, input.caret);
+                input.text.replace_range(input.caret..next, "");
+                input.error = None;
+            }
+            KeyCode::Left => {
+                input.caret = previous_grapheme_boundary(&input.text, input.caret);
+            }
+            KeyCode::Right => {
+                input.caret = next_grapheme_boundary(&input.text, input.caret);
+            }
+            KeyCode::Home => input.caret = 0,
+            KeyCode::End => input.caret = input.text.len(),
+            KeyCode::Char('u')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                input.text.clear();
+                input.caret = 0;
+                input.error = None;
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::SUPER)
+                    && (!key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::ALT)) =>
+            {
+                input.text.insert(input.caret, ch);
+                input.caret += ch.len_utf8();
+                input.error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn navigate_search(&mut self, forward: bool) {
+        if self.search.matches.is_empty() {
+            if !self.search.pattern.is_empty() {
+                self.set_notice("Pattern not found");
+            }
+            return;
+        }
+        let Some(current) = stepped_search_index(
+            self.search.current,
+            self.search.matches.len(),
+            forward,
+        ) else {
+            return;
+        };
+        self.search.current = Some(current);
+        self.reveal_current_search();
     }
 
     fn start_comment(&mut self) {
@@ -2462,6 +2898,14 @@ impl InlinePreview {
     pub fn on_paste(&mut self, text: &str) {
         if let Some(draft) = self.draft.as_mut() {
             draft.insert(text);
+        } else if let Some(input) = self.search.input.as_mut() {
+            let text: String = text
+                .chars()
+                .filter(|ch| !matches!(ch, '\r' | '\n'))
+                .collect();
+            input.text.insert_str(input.caret, &text);
+            input.caret += text.len();
+            input.error = None;
         }
     }
 
@@ -2499,6 +2943,7 @@ impl InlinePreview {
         let Some((width, request)) = read_inline_control(control) else {
             if self.current.is_some() {
                 self.cancel_comment();
+                self.clear_search();
                 self.agent_picker = None;
                 self.current = None;
                 self.doc = None;
@@ -2510,6 +2955,7 @@ impl InlinePreview {
             return;
         }
         self.cancel_comment();
+        self.clear_search();
         self.agent_picker = None;
         self.sidebar_width = width.max(1);
         let state = crate::state::load_state();
@@ -2577,6 +3023,7 @@ impl InlinePreview {
             self.theme,
             inner,
             &comment_ranges,
+            Some(&self.search),
             highlight_styles,
         );
         self.body = body;
@@ -2589,7 +3036,42 @@ impl InlinePreview {
             .filter(|(_, until)| Instant::now() < *until)
             .map(|(message, _)| message.clone());
         self.footer_actions.clear();
-        if let Some(notice) = notice.as_deref() {
+        if let Some(input) = self.search.input.as_ref() {
+            let prefix = " /";
+            let available = usize::from(footer.width.saturating_sub(prefix.cell_width()));
+            let (rows, cursor_row, cursor_column) =
+                editor_rows(&input.text, input.caret, available);
+            let shown = rows.into_iter().nth(cursor_row).unwrap_or_default();
+            let shown_width = u16::try_from(shown.width()).unwrap_or(u16::MAX);
+            let mut spans = vec![Span::styled(
+                prefix,
+                Style::default().fg(Color::LightBlue),
+            )];
+            spans.extend(shown.spans);
+            let used = prefix.cell_width().saturating_add(shown_width);
+            let suffix = input
+                .error
+                .as_deref()
+                .map(|error| (format!("  {error}"), Style::default().red()))
+                .unwrap_or_else(|| {
+                    (
+                        "  Enter search · Esc cancel".to_string(),
+                        Style::default().dim(),
+                    )
+                });
+            if used + suffix.0.cell_width() <= footer.width {
+                spans.push(Span::styled(suffix.0, suffix.1));
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), footer);
+            frame.set_cursor_position(Position::new(
+                footer
+                    .x
+                    .saturating_add(prefix.cell_width())
+                    .saturating_add(u16::try_from(cursor_column).unwrap_or(u16::MAX))
+                    .min(footer.x + footer.width.saturating_sub(1)),
+                footer.y,
+            ));
+        } else if let Some(notice) = notice.as_deref() {
             frame.render_widget(Paragraph::new(notice.dim()), footer);
         } else {
             let selected = self
@@ -2599,8 +3081,8 @@ impl InlinePreview {
             let mut x = footer.x;
             let mut spans = Vec::new();
             if !selected {
-                let label = " drag to select text";
-                spans.push(Span::styled(label, Style::default().dim()));
+                let label = preview_outer_hint(&self.search);
+                spans.push(Span::styled(label.clone(), Style::default().dim()));
                 x = x.saturating_add(label.cell_width());
             }
             for (action, label) in footer_entries(selected, !self.comments.is_empty()) {
@@ -2653,7 +3135,8 @@ impl InlinePreview {
                 picker.selected,
                 &mut picker.scroll,
             );
-        } else if let Some(hover) = self
+        } else if self.search.input.is_none()
+            && let Some(hover) = self
             .comment_hover
             .as_ref()
             .filter(|hover| Instant::now() < hover.until)
@@ -2699,6 +3182,12 @@ impl InlinePreview {
             self.on_draft_key(key);
             return;
         }
+        if self.search.input.is_some()
+            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        {
+            self.on_search_key(key);
+            return;
+        }
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -2726,6 +3215,24 @@ impl InlinePreview {
             self.clear_current_file_comments();
             return;
         }
+        let no_command_modifier = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        if key.code == KeyCode::Char('/') && no_command_modifier {
+            self.start_search();
+            return;
+        }
+        if (matches!(key.code, KeyCode::Char('N'))
+            || (key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::SHIFT)))
+            && no_command_modifier
+        {
+            self.navigate_search(false);
+            return;
+        }
+        if key.code == KeyCode::Char('n') && no_command_modifier {
+            self.navigate_search(true);
+            return;
+        }
         if key.code == KeyCode::Esc
             && self
                 .doc
@@ -2735,6 +3242,10 @@ impl InlinePreview {
             if let Some(doc) = self.doc.as_mut() {
                 doc.clear_selection();
             }
+            return;
+        }
+        if key.code == KeyCode::Esc && self.search.is_active() {
+            self.clear_search();
             return;
         }
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
@@ -2764,6 +3275,11 @@ impl InlinePreview {
         }
         if self.draft.is_some() {
             self.comment_hover = None;
+            return;
+        }
+        if self.search.input.is_some() {
+            self.comment_hover = None;
+            self.footer_hover = None;
             return;
         }
         if self.agent_picker.is_some() {
@@ -2943,6 +3459,7 @@ impl InlinePreview {
         }
         if self.draft.is_some()
             || self.agent_picker.is_some()
+            || self.search.is_active()
             || !self.comments.is_empty()
             || self
                 .doc
@@ -2995,6 +3512,7 @@ impl InlinePreview {
             doc.scroll = keep;
         }
         self.doc = Some(doc);
+        self.rebuild_search(false);
         self.last_refresh = Instant::now();
     }
 
@@ -3018,6 +3536,7 @@ impl InlinePreview {
             doc.scroll = keep;
         }
         self.doc = Some(doc);
+        self.rebuild_search(false);
         self.last_refresh = Instant::now();
     }
 
@@ -3026,6 +3545,7 @@ impl InlinePreview {
             return;
         }
         self.cancel_comment();
+        self.clear_search();
         self.agent_picker = None;
         self.footer_actions.clear();
         self.footer_hover = None;
@@ -3115,6 +3635,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                 theme,
                 area,
                 &[],
+                None,
                 crate::syntax::preview_highlight_styles(diff_theme),
             );
         });
@@ -3228,12 +3749,26 @@ fn highlight_cells(
     selected: (usize, usize),
     highlight: Style,
 ) -> Line<'static> {
+    highlight_cell_ranges(line, &[selected], highlight)
+}
+
+fn highlight_cell_ranges(
+    line: Line<'static>,
+    ranges: &[(usize, usize)],
+    highlight: Style,
+) -> Line<'static> {
     let mut cells = 0usize;
+    let mut range = 0usize;
     let mut spans: Vec<Span<'static>> = Vec::new();
     for span in line.spans {
         for grapheme in span.content.graphemes(true) {
             let width = grapheme.cell_width() as usize;
-            let highlighted = cells < selected.1 && cells + width.max(1) > selected.0;
+            while ranges.get(range).is_some_and(|selected| selected.1 <= cells) {
+                range += 1;
+            }
+            let highlighted = ranges
+                .get(range)
+                .is_some_and(|selected| cells < selected.1 && cells + width.max(1) > selected.0);
             let style = if highlighted {
                 span.style.patch(highlight)
             } else {
@@ -3260,8 +3795,11 @@ fn draw_doc(
     theme: IconTheme,
     area: Rect,
     comment_ranges: &[TextSelection],
+    search: Option<&PreviewSearch>,
     highlight_styles: PreviewHighlightStyles,
 ) -> (usize, Rect) {
+    let search_matches = search.map_or(&[][..], |search| search.matches.as_slice());
+    let current_search = search.and_then(|search| search.current);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -3316,6 +3854,20 @@ fn draw_doc(
                         line = highlight_cells(line, cells, highlight_styles.comment);
                     }
                 }
+                if let Some(source_row) = doc.source_row_at(visual_row) {
+                    let matches = search_matches_on_row(search_matches, source_row)
+                        .iter()
+                        .filter_map(|found| doc.search_cells(visual_row, *found))
+                        .collect::<Vec<_>>();
+                    if !matches.is_empty() {
+                        line = highlight_cell_ranges(line, &matches, highlight_styles.comment);
+                    }
+                }
+                if let Some(found) = current_search.and_then(|index| search_matches.get(index))
+                    && let Some(cells) = doc.search_cells(visual_row, *found)
+                {
+                    line = highlight_cells(line, cells, highlight_styles.selection);
+                }
                 if let Some(cells) = doc.selection_cells(visual_row) {
                     line = highlight_cells(line, cells, highlight_styles.selection);
                 }
@@ -3335,6 +3887,18 @@ fn draw_doc(
                     if let Some(cells) = doc.range_cells(n, *range) {
                         line = highlight_cells(line, cells, highlight_styles.comment);
                     }
+                }
+                let matches = search_matches_on_row(search_matches, n)
+                    .iter()
+                    .filter_map(|found| doc.search_cells(n, *found))
+                    .collect::<Vec<_>>();
+                if !matches.is_empty() {
+                    line = highlight_cell_ranges(line, &matches, highlight_styles.comment);
+                }
+                if let Some(found) = current_search.and_then(|index| search_matches.get(index))
+                    && let Some(cells) = doc.search_cells(n, *found)
+                {
+                    line = highlight_cells(line, cells, highlight_styles.selection);
                 }
                 if let Some(cells) = doc.selection_cells(n) {
                     line = highlight_cells(line, cells, highlight_styles.selection);
@@ -4181,6 +4745,334 @@ mod tests {
         let exported = doc.selection_export().unwrap();
         assert_eq!(exported.snippet, "-defghij");
         assert!(exported.removed);
+    }
+
+    #[test]
+    fn preview_regex_search_maps_unicode_tabs_and_wrapped_diff_cells() {
+        let diff = "@@ -0,0 +1,1 @@\n+a\t中42 tail\n";
+        let rendered = crate::diffview::render_expanded(
+            "x.txt",
+            diff,
+            crate::syntax::DEFAULT_DIFF_THEME,
+            &HashSet::new(),
+            false,
+        );
+        let sources = rendered
+            .sources
+            .into_iter()
+            .map(|source| source.map(SelectableRow::diff))
+            .collect();
+        let mut doc = Doc::new(
+            "x.txt".into(),
+            String::new(),
+            rendered.lines,
+            false,
+            rendered.folds,
+        )
+        .with_sources(sources);
+        let regex = build_search_regex(r"中\d+", true, true, false).unwrap();
+        let matches = doc.search_matches(&regex);
+        assert_eq!(
+            matches,
+            vec![SearchMatch {
+                row: 0,
+                source: SearchSourceId::Source(SourceKind::Diff {
+                    old_line: None,
+                    new_line: Some(1),
+                    kind: crate::diffview::DiffSourceKind::Added,
+                }),
+                fold: None,
+                start: 2,
+                end: 7,
+            }]
+        );
+
+        doc.ensure_visual_lines(9); // Five-cell diff gutter leaves four content cells.
+        let visual_row = doc.search_visual_row(matches[0]).unwrap();
+        assert!(
+            (0..doc.visual_len()).any(|row| doc.search_cells(row, matches[0]).is_some()),
+            "the raw UTF-8 range must survive tab expansion and wrapping"
+        );
+        assert!(doc.search_cells(visual_row, matches[0]).is_some());
+    }
+
+    #[test]
+    fn preview_search_indexes_hidden_diff_context_for_targeted_expansion() {
+        use std::fmt::Write as _;
+
+        fn doc(rendered: crate::diffview::RenderedDiff) -> Doc {
+            let search_sources = rendered
+                .hidden_search_sources
+                .into_iter()
+                .map(|source| SearchSource {
+                    row: source.row,
+                    fold: source.fold,
+                    raw: source.source.text,
+                    kind: SourceKind::Diff {
+                        old_line: source.source.old_line,
+                        new_line: source.source.new_line,
+                        kind: source.source.kind,
+                    },
+                })
+                .collect();
+            Doc::new(
+                "x.rs".into(),
+                String::new(),
+                rendered.lines,
+                false,
+                rendered.folds,
+            )
+            .with_sources(
+                rendered
+                    .sources
+                    .into_iter()
+                    .map(|source| source.map(SelectableRow::diff))
+                    .collect(),
+            )
+            .with_search_sources(search_sources)
+        }
+
+        let mut diff = String::from("@@ -1,30 +1,30 @@\n");
+        for line in 1..=30 {
+            if line == 15 {
+                diff.push_str("-old\n+new\n");
+            } else {
+                writeln!(diff, " line_{line}").unwrap();
+            }
+        }
+        let regex = build_search_regex(r"^line_1$", true, true, false).unwrap();
+        let collapsed = doc(crate::diffview::render_expanded(
+            "x.rs",
+            &diff,
+            crate::syntax::DEFAULT_DIFF_THEME,
+            &HashSet::new(),
+            true,
+        ));
+        let hidden = collapsed.search_matches(&regex);
+        assert_eq!(hidden.len(), 1);
+        let fold = hidden[0].fold.expect("leading context should remain searchable");
+        assert!(collapsed.search_visual_row(hidden[0]).is_some());
+        assert!(collapsed.search_cells(hidden[0].row, hidden[0]).is_none());
+
+        let expanded = doc(crate::diffview::render_expanded(
+            "x.rs",
+            &diff,
+            crate::syntax::DEFAULT_DIFF_THEME,
+            &HashSet::from([fold]),
+            true,
+        ));
+        let revealed = expanded.search_matches(&regex);
+        assert_eq!(revealed.len(), 1);
+        assert!(revealed[0].fold.is_none());
+        assert!(revealed[0].same_source_range(hidden[0]));
+        assert!(
+            expanded.folds.iter().any(Option::is_some),
+            "unrelated context folds must stay collapsed"
+        );
+    }
+
+    #[test]
+    fn preview_search_highlights_all_matches_and_marks_the_current_one() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut doc = Doc::new(
+            "x.txt".into(),
+            String::new(),
+            vec![Line::raw("alpha beta alpha")],
+            true,
+            Vec::new(),
+        )
+        .with_sources(vec![Some(SelectableRow::file("alpha beta alpha", 1))]);
+        let regex = build_search_regex("alpha", true, true, false).unwrap();
+        let matches = doc.search_matches(&regex);
+        let search = PreviewSearch {
+            pattern: "alpha".into(),
+            matches,
+            current: Some(1),
+            ..PreviewSearch::default()
+        };
+        let styles = crate::syntax::preview_highlight_styles(crate::syntax::DEFAULT_DIFF_THEME);
+        let mut terminal = Terminal::new(TestBackend::new(30, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_doc(
+                    frame,
+                    &mut doc,
+                    IconTheme::Emoji,
+                    frame.area(),
+                    &[],
+                    Some(&search),
+                    styles,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(Some(buffer[(2, 1)].bg), styles.comment.bg);
+        assert_eq!(Some(buffer[(13, 1)].bg), styles.selection.bg);
+    }
+
+    #[test]
+    fn preview_search_navigation_wraps_and_footer_exposes_shortcuts() {
+        assert_eq!(stepped_search_index(None, 3, true), Some(0));
+        assert_eq!(stepped_search_index(Some(2), 3, true), Some(0));
+        assert_eq!(stepped_search_index(Some(0), 3, false), Some(2));
+        assert_eq!(stepped_search_index(None, 0, true), None);
+
+        let empty = PreviewSearch::default();
+        assert!(preview_outer_hint(&empty).starts_with(" / Search"));
+        let active = PreviewSearch {
+            pattern: "foo".into(),
+            matches: vec![
+                SearchMatch {
+                    row: 0,
+                    source: SearchSourceId::Rendered(0),
+                    fold: None,
+                    start: 0,
+                    end: 3,
+                },
+                SearchMatch {
+                    row: 2,
+                    source: SearchSourceId::Rendered(2),
+                    fold: None,
+                    start: 4,
+                    end: 7,
+                },
+            ],
+            current: Some(1),
+            ..PreviewSearch::default()
+        };
+        assert_eq!(preview_outer_hint(&active), " / Search  2/2  n Next  N Prev");
+    }
+
+    #[test]
+    fn preview_search_input_keeps_invalid_regex_and_escapes_in_layers() {
+        let lines = vec![Line::raw("alpha"), Line::raw("beta"), Line::raw("alpha")];
+        let sources = ["alpha", "beta", "alpha"]
+            .into_iter()
+            .enumerate()
+            .map(|(line, text)| Some(SelectableRow::file(text, line + 1)))
+            .collect();
+        let mut preview = InlinePreview {
+            owner: None,
+            restore_focus: None,
+            control: None,
+            current: Some(Request::File(PathBuf::from("x.txt"))),
+            doc: Some(
+                Doc::new("x.txt".into(), String::new(), lines, true, Vec::new())
+                    .with_sources(sources),
+            ),
+            theme: IconTheme::Emoji,
+            diff_theme: crate::syntax::DEFAULT_DIFF_THEME,
+            hide_unmodified: true,
+            expanded_folds: HashSet::new(),
+            sidebar_width: 30,
+            area: Rect::new(0, 0, 30, 3),
+            body: Rect::new(0, 1, 30, 1),
+            dragging_selection: false,
+            selection_dragged: false,
+            search: PreviewSearch {
+                input: Some(SearchInput {
+                    text: "alpha".into(),
+                    caret: "alpha".len(),
+                    error: None,
+                }),
+                ..PreviewSearch::default()
+            },
+            comments: Vec::new(),
+            draft: None,
+            agent_picker: None,
+            footer_actions: Vec::new(),
+            footer_hover: None,
+            comment_hover: None,
+            notice: None,
+            last_refresh: Instant::now(),
+        };
+
+        preview.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(preview.search.pattern, "alpha");
+        assert_eq!(preview.search.matches.len(), 2);
+        assert_eq!(preview.search.current, Some(0));
+        preview.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(preview.search.current, Some(1));
+        assert_eq!(preview.doc.as_ref().unwrap().scroll, 2);
+        preview.on_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert_eq!(preview.search.current, Some(0));
+
+        preview.search.input = Some(SearchInput {
+            text: "(".into(),
+            caret: 1,
+            error: None,
+        });
+        preview.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(preview.search.pattern, "alpha");
+        assert_eq!(
+            preview.search.input.as_ref().unwrap().error.as_deref(),
+            Some("Invalid regex")
+        );
+
+        let text = "a中🙂z";
+        preview.search.input = Some(SearchInput {
+            text: text.into(),
+            caret: text.len(),
+            error: None,
+        });
+        preview.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(preview.search.input.as_ref().unwrap().caret, text.len() - 1);
+        preview.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(preview.search.input.as_ref().unwrap().text, "a中z");
+        preview.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        preview.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        preview.on_paste("β\n");
+        assert_eq!(preview.search.input.as_ref().unwrap().text, "aβ中z");
+        preview.on_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(preview.search.input.as_ref().unwrap().text, "aβz");
+        preview.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(
+            preview.search.input.as_ref().unwrap().caret,
+            "aβz".len()
+        );
+
+        preview.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(preview.search.input.is_none());
+        assert_eq!(preview.search.pattern, "alpha");
+        preview.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!preview.search.is_active());
+        assert!(preview.is_open());
+        preview.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!preview.is_open());
+    }
+
+    #[test]
+    fn preview_search_uses_regex_syntax_and_rejects_invalid_patterns() {
+        let doc = Doc::new(
+            "rendered.md".into(),
+            String::new(),
+            vec![Line::raw("Foo12"), Line::raw("bar"), Line::raw("foo34")],
+            false,
+            Vec::new(),
+        );
+        let regex = build_search_regex(r"(?i)^foo\d+$", true, true, false).unwrap();
+        assert_eq!(
+            doc.search_matches(&regex),
+            vec![
+                SearchMatch {
+                    row: 0,
+                    source: SearchSourceId::Rendered(0),
+                    fold: None,
+                    start: 0,
+                    end: 5,
+                },
+                SearchMatch {
+                    row: 2,
+                    source: SearchSourceId::Rendered(2),
+                    fold: None,
+                    start: 0,
+                    end: 5,
+                },
+            ]
+        );
+        assert!(build_search_regex("(", true, true, false).is_err());
     }
 
     #[test]

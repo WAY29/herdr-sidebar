@@ -689,6 +689,22 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   recipient. Locations include character columns (`path:line:column-line:column`), and removed-only
   diff selections are marked `(removed)`. Glow-formatted Markdown and legacy ANSI `git show`
   remain non-selectable because they have no reliable source-coordinate map.
+- Preview-local Vim-style search is separate from the repository Search view: `/` opens a
+  one-line Rust-regex input, Enter confirms, and `n` / `N` move through the current Preview with
+  wraparound. The outer footer always exposes `/ Search`; after confirmation it also shows the
+  current/total count and `n` / `N` hints. Invalid regexes keep the input open and do not replace
+  the prior search. Search and Comment editors move on grapheme boundaries with Left/Right and
+  support Home/End (document ends for Search, current-line ends for multi-line Comments). Every
+  match uses the selected Diff Theme's `find_highlight`, while the current
+  match uses its `selection` style; active character selection remains the top rendering layer.
+  Search ranges stay as UTF-8 byte offsets and reuse the existing source-to-cell map, preserving
+  tabs, wide/combining glyphs, diff gutters, and wrapped rows. Structured-diff search indexes
+  retained context behind collapsed folds without allocating hidden render spans; navigating to a
+  hidden match expands only its owning fold, reloads through the existing fold path, then locates
+  the same source line/range. A new Preview request clears the session-local search, and live diff
+  refresh pauses while search is active so match coordinates cannot go stale. Esc cancels active
+  search input first; outside the input it clears an active character selection, then a confirmed
+  search, before it closes Preview.
 
 ### Syntax highlighting (file preview)
 

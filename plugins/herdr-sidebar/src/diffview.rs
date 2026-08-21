@@ -47,6 +47,7 @@ pub struct RenderedDiff {
     pub folds: Vec<Option<FoldId>>,
     pub first_change: Option<usize>,
     pub sources: Vec<Option<DiffSource>>,
+    pub hidden_search_sources: Vec<DiffSearchSource>,
 }
 
 /// Source text and line identity behind one selectable rendered diff row.
@@ -56,6 +57,13 @@ pub struct DiffSource {
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
     pub kind: DiffSourceKind,
+}
+
+/// Searchable source row, including context retained behind a collapsed fold.
+pub struct DiffSearchSource {
+    pub row: usize,
+    pub fold: Option<FoldId>,
+    pub source: DiffSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,7 +307,7 @@ pub fn render_expanded(
     expanded: &HashSet<FoldId>,
     hide_unmodified: bool,
 ) -> RenderedDiff {
-    let evs = parse_events(diff);
+    let mut evs = parse_events(diff);
     let ranges = word_ranges(&evs);
     let fold_ranges = if hide_unmodified {
         fold_ranges(&evs)
@@ -338,6 +346,7 @@ pub fn render_expanded(
     let mut lines = Vec::new();
     let mut folds = Vec::new();
     let mut sources = Vec::new();
+    let mut hidden_search_sources = Vec::new();
     let mut first_change = None;
     let mut pending_folds = fold_ranges.iter().peekable();
     let mut idx = 0;
@@ -357,6 +366,20 @@ pub fn render_expanded(
                         _ => None,
                     }),
                 );
+                let row = lines.len();
+                hidden_search_sources.extend(evs[fold.start..fold.end].iter_mut().filter_map(|ev| {
+                    let Ev::Ctx(old_line, new_line, text) = ev else { return None };
+                    Some(DiffSearchSource {
+                        row,
+                        fold: Some(fold.id),
+                        source: DiffSource {
+                            text: std::mem::take(text),
+                            old_line: Some(*old_line),
+                            new_line: Some(*new_line),
+                            kind: DiffSourceKind::Context,
+                        },
+                    })
+                }));
                 lines.push(
                     Line::from(Span::styled(
                         format!(
@@ -446,6 +469,7 @@ pub fn render_expanded(
         folds,
         first_change,
         sources,
+        hidden_search_sources,
     }
 }
 
