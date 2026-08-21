@@ -21,7 +21,7 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
-use herdr_sidebar::{launch, state, viewer};
+use herdr_sidebar::{ipc, launch, state, viewer};
 use herdr_sidebar::workspace_sync::Session as SyncSession;
 use state::{Exit, View};
 
@@ -130,6 +130,10 @@ fn main() -> std::io::Result<()> {
     // itself (the app loops haven't started yet, and a token-less pane gets
     // REPLACE-killed by the corpse rule while the user reads the prompt).
     herdr_sidebar::fontsetup::maybe_prompt(&mut terminal, view, persisted.merged)?;
+    let pane_id = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|id| !id.is_empty());
+    set_right_click_target(pane_id.as_deref(), "pane");
     // Legacy terminal input cannot represent Command/Super. Request Kitty's
     // disambiguated keys so macOS Cmd+C reaches Preview instead of plain `c`.
     let enhanced_keys = supports_keyboard_enhancement().unwrap_or(false);
@@ -163,7 +167,16 @@ fn main() -> std::io::Result<()> {
     }
     let _ = crossterm::execute!(std::io::stdout(), DisableFocusChange, DisableMouseCapture);
     ratatui::restore();
+    set_right_click_target(pane_id.as_deref(), "herdr");
     result
+}
+
+fn set_right_click_target(pane_id: Option<&str>, target: &str) {
+    let Some(pane_id) = pane_id else { return };
+    let _ = ipc::call_text(
+        "pane.input.set",
+        serde_json::json!({ "pane_id": pane_id, "right_click": target }),
+    );
 }
 
 fn read_stdin() -> std::io::Result<String> {

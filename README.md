@@ -73,10 +73,14 @@ A real tree, not a directory dump:
   from the active Diff Theme; a match inside folded diff context expands only that fold. Search
   and Comment inputs support Left/Right and Home/End cursor movement.
 - **Double-click folders** to fold, hover highlights, mouse wheel, a full root-relative path
-  tooltip for every file and folder, and a hover **⋯ menu button**: New File, New Folder,
+  tooltip for every file and folder, and a file menu opened by plain right-click or the hover
+  **⋯ button**: New File, New Folder,
   Open with Default App (files
   only — hands the file to the OS-associated app, like a double click in the file
-  manager), Rename, Delete, Copy Path / Relative Path, Reveal in File Explorer.
+  manager), Rename, Delete, Copy Path / Relative Path, Reveal in File Explorer. Hosts exposing
+  `pane.input.set` hand plain right-click to the active Sidebar and get it back on exit; older
+  hosts retain the **⋯** and configured-modifier fallbacks. Right-click the pane border for
+  herdr's own pane menu.
 - Dotfiles toggle, live refresh, and `b` / the bottom-right `«` button to hide the Sidebar for
   the current tab. Invoke the toggle action to bring it back.
 - Prefer the sidebar closed? Toggle "Auto-open sidebar" off in ⚙ Settings and it stays
@@ -123,8 +127,8 @@ Everything you reach for in an editor's source-control panel, in a terminal pane
   green/red `+N -N` line totals.
 - **Tree or list layout** — changed and historical files default to a compact folder tree,
   including deleted paths; switch the global SCM file view in ⚙ Settings when a flat list
-  is more useful. Folder rows fold and bulk-stage/unstage; hover `⋯` opens path-aware file
-  and folder menus without taking over herdr's normal pane right click.
+  is more useful. Folder rows fold and bulk-stage/unstage; plain right-click or the hover `⋯`
+  opens path-aware file and folder menus.
 - **Collapse or expand repository content** — the title action toggles between Collapse All and
   Expand All for the repository area: message box, Commit, Sync Changes, repository sections,
   and Staged/Changes trees. A heavy divider separates that area from Graph and the later drawers,

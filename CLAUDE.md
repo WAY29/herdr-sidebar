@@ -218,13 +218,16 @@ Socket API (what the CLI wraps; usable directly from plugins, no subprocess need
 - Method names/params: `herdr api schema --json`, or `src/api/schema*` in the herdr source.
 
 Mouse in plugin TUIs: herdr forwards clicks/motion/wheel to a pane app that enables mouse
-capture — but in herdr 0.8.0 **right-click is always intercepted** for herdr's pane context menu
-unless the click carries the modifier configured in `[ui] right_click_passthrough_modifier`
-(config.toml; e.g. `"ctrl"` → Ctrl+right-click reaches the app with ctrl stripped). The installed
-0.8.0 socket schema has no `pane.input.set`; post-0.8 source added it in #2504, but do not depend
-on it until a release exposes the method. Sidebar file/folder rows instead reserve a fixed
-three-cell hover `⋯` button whose left click opens the plugin menu while plain right-click remains
-herdr's pane menu. Same-tab `pane.move` is a deliberate no-op
+capture. Herdr 0.8.0 always intercepts plain right-click for its pane context menu unless the
+click carries `[ui] right_click_passthrough_modifier`; newer hosts expose `pane.input.set`
+(verified in the installed 0.8.1 schema). The normal Sidebar entrypoint best-effort sets its own
+pane to `right_click: "pane"` after the font prompt and restores `right_click: "herdr"` after
+mouse capture and the alternate screen are closed. Thus unified and separated Sidebar panes get
+plain right-click menus without changing Agent panes, pane-border right-click remains herdr's
+menu, and quitting back to a shell does not leave passthrough behind. An older host's API error is
+ignored: the configured modifier and fixed three-cell hover `⋯` button remain compatible
+fallbacks. Routing is pane-wide, so Search/Preview also receive plain right-click even though they
+currently assign it no action. Same-tab `pane.move` is a deliberate no-op
 (`SameTab`) — restructure within a tab by bouncing the pane through `--new-tab` and back
 (herdr auto-closes the emptied temp tab).
 - The local Herdr host patch offers an explicit OSC 8 URI to matching plugin `[[link_handlers]]`
@@ -581,7 +584,8 @@ the build (direct downloads work) rather than changing `build.zig.zon`.
   saved untracked files. File History uses `git log --follow --name-status -z`, preserving
   the historical path across renames and opening that file's structured diff directly.
   Graph deliberately retains raw colored `git show --stat --patch`; Worktrees and Remotes
-  retain their previous behavior. Ctrl+right-click opens
+  retain their previous behavior. Plain right-click (or the configured modifier on an older
+  host) opens
   per-type menus (checkout / merge / cherry-pick / revert / reset / stash apply-pop-drop /
   fetch / delete / copy); destructive ones route through the generic `Overlay::ConfirmGit`
   y/N prompt. Hovered current-change rows show a `⋯` menu cell followed by the existing

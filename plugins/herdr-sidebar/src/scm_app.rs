@@ -1732,8 +1732,8 @@ impl App {
                 return self.left_click(mouse);
             }
             MouseEventKind::Down(MouseButton::Right) => {
-                // Reaches us only as Ctrl+right-click (herdr's passthrough
-                // modifier); plain right-click opens herdr's own pane menu.
+                // Newer herdr hosts route plain right-click to this pane;
+                // older hosts can still use their configured modifier.
                 self.flash = None;
                 self.open_context_menu(mouse.column, mouse.row);
             }
